@@ -41,8 +41,7 @@
  * NOTE: You can insert any other possible state
  * for your own convenience
  */
-typedef enum
-{
+typedef enum {
   LISTEN,
   ESTABLISHED,
   CLOSING_BY_PEER,
@@ -58,8 +57,7 @@ typedef enum
  *
  * NOTE: Fill free to insert additional fields.
  */
-typedef struct
-{
+typedef struct {
   int sd;                       /**< The underline UDP socket descriptor */
   mircotcp_state_t state;       /**< The state of the microTCP socket */
   size_t init_win_size;         /**< The window size negotiated at the 3-way handshake */
@@ -89,8 +87,7 @@ typedef struct
  * microTCP header structure
  * NOTE: DO NOT CHANGE!
  */
-typedef struct
-{
+typedef struct {
   uint32_t seq_number;          /**< Sequence number */
   uint32_t ack_number;          /**< ACK number */
   uint16_t control;             /**< Control bits (e.g. SYN, ACK, FIN) */
@@ -103,16 +100,11 @@ typedef struct
 } microtcp_header_t;
 
 
-microtcp_sock_t
-microtcp_socket (int domain, int type, int protocol);
+microtcp_sock_t microtcp_socket (int domain, int type, int protocol);
 
-int
-microtcp_bind (microtcp_sock_t *socket, const struct sockaddr *address,
-               socklen_t address_len);
+int microtcp_bind (microtcp_sock_t *socket, const struct sockaddr *address, socklen_t address_len);
 
-int
-microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address,
-                  socklen_t address_len);
+int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, socklen_t address_len);
 
 /**
  * Blocks waiting for a new connection from a remote peer.
@@ -123,19 +115,13 @@ microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address,
  * @return ATTENTION despite the original accept() this function returns
  * 0 on success or -1 on failure
  */
-int
-microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address,
-                 socklen_t address_len);
+int microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address, socklen_t address_len);
 
-int
-microtcp_shutdown(microtcp_sock_t *socket, int how);
+int microtcp_shutdown(microtcp_sock_t *socket, int how);
 
-ssize_t
-microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length,
-               int flags);
+ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length, int flags);
 
-ssize_t
-microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags);
+ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags);
 
 
 #endif /* LIB_MICROTCP_H_ */

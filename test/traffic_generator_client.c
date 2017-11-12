@@ -31,17 +31,14 @@
 
 static char running = 1;
 
-static void
-sig_handler(int signal)
-{
+static void sig_handler(int signal) {
   if(signal == SIGINT) {
     LOG_INFO("Stopping traffic generator client...");
     running = 0;
   }
 }
 
-int
-main(int argc, char **argv) {
+int main(int argc, char **argv) {
   uint16_t port;
 
   /*

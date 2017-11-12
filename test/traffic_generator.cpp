@@ -37,18 +37,14 @@
 static bool stop_traffic = false;
 
 
-void
-sig_handler(int signal)
-{
+void sig_handler(int signal) {
   if(signal == SIGINT) {
     LOG_INFO("Stopping traffic generator...");
     stop_traffic = true;
   }
 }
 
-int
-main (int argc, char **argv)
-{
+int main (int argc, char **argv) {
   int                   opt;
   int                   ret;
   int                   port;

@@ -23,8 +23,6 @@
  * This file is already inserted at the build system.
  */
 
-int
-main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
 
 }

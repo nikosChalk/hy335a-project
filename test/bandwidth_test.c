@@ -37,9 +37,7 @@
 
 #define CHUNK_SIZE 4096
 
-static inline void
-print_statistics (ssize_t received, struct timespec start, struct timespec end)
-{
+static inline void print_statistics (ssize_t received, struct timespec start, struct timespec end) {
   double elapsed = end.tv_sec - start.tv_sec
       + (end.tv_nsec - start.tv_nsec) * 1e-9;
   double megabytes = received / (1024.0 * 1024.0);
@@ -48,9 +46,7 @@ print_statistics (ssize_t received, struct timespec start, struct timespec end)
   printf ("Throughput achieved: %f MB/s\n", megabytes / elapsed);
 }
 
-int
-server_tcp (uint16_t listen_port, const char *file)
-{
+int server_tcp (uint16_t listen_port, const char *file) {
   uint8_t *buffer;
   FILE *fp;
   int sock;
@@ -156,16 +152,12 @@ server_tcp (uint16_t listen_port, const char *file)
   return 0;
 }
 
-int
-server_microtcp (uint16_t listen_port, const char *file)
-{
+int server_microtcp (uint16_t listen_port, const char *file) {
   /*TODO: Write your code here */
   return 0;
 }
 
-int
-client_tcp (const char *serverip, uint16_t server_port, const char *file)
-{
+int client_tcp (const char *serverip, uint16_t server_port, const char *file) {
   uint8_t *buffer;
   int sock;
   socklen_t client_addr_len;
@@ -245,16 +237,12 @@ client_tcp (const char *serverip, uint16_t server_port, const char *file)
   return 0;
 }
 
-int
-client_microtcp (const char *serverip, uint16_t server_port, const char *file)
-{
+int client_microtcp (const char *serverip, uint16_t server_port, const char *file) {
   /*TODO: Write your code here */
   return 0;
 }
 
-int
-main (int argc, char **argv)
-{
+int main (int argc, char **argv) {
   int opt;
   int port;
   int exit_code = 0;
