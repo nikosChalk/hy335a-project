@@ -23,7 +23,9 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 #include <stdint.h>
+#include "../utils/log.h"
 
 /*
  * Several useful constants
@@ -109,7 +111,7 @@ int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, s
 /**
  * Blocks waiting for a new connection from a remote peer.
  *
- * @param socket the socket structure
+ * @param socket the socket structure. Must not be NULL.
  * @param address pointer to store the address information of the connected peer
  * @param address_len the length of the address structure.
  * @return ATTENTION despite the original accept() this function returns
