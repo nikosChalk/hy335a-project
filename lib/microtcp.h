@@ -43,6 +43,7 @@
  */
 typedef enum {
     LISTEN,
+    BINDED,
     ESTABLISHED,
     CLOSING_BY_PEER,
     CLOSING_BY_HOST,
@@ -50,6 +51,17 @@ typedef enum {
     INVALID
 } mircotcp_state_t;
 
+/**
+ * Statistics for a microtcp connection
+ */
+typedef struct {
+    uint64_t packets_send;
+    uint64_t packets_received;
+    uint64_t packets_lost;
+    uint64_t bytes_send;
+    uint64_t bytes_received;
+    uint64_t bytes_lost;
+} microtcp_sock_statistics_t;
 
 /**
  * This is the microTCP socket structure. It holds all the necessary
@@ -78,15 +90,9 @@ typedef struct {
     size_t peer_seq_number ;      /* Peer's last received sequence number. */
 
     struct sockaddr_in *peer_sin;    /* Peer's address and port so that we can remember him when accept and connect are called */
+    microtcp_sock_statistics_t *statistics;  /* Statistics of the microtcp socket */
 
-    uint64_t packets_send;
-    uint64_t packets_received;
-    uint64_t packets_lost;
-    uint64_t bytes_send;
-    uint64_t bytes_received;
-    uint64_t bytes_lost;
 } microtcp_sock_t;
-
 
 /**
  * microTCP header structure

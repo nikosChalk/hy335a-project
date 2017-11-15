@@ -46,6 +46,7 @@ void set_bit(void *var, size_t length, uint8_t nth_byte, uint8_t nth_bit, uint8_
 
     mask = value << nth_bit;
     *mem = *mem | mask;    /* Set the n-th bit to value */
+    assert(get_bit(var, length, nth_byte, nth_bit) == value);
 }
 
 static void* get_byte(void const *var, size_t length, uint8_t nth_byte) {
