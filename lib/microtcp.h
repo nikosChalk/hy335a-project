@@ -43,12 +43,13 @@
  */
 typedef enum {
     LISTEN,
-    BINDED,
-    ESTABLISHED,
+    BINDED,         /* Set by bind() */
+    ESTABLISHED,    /* Set by accept(), connect() */
     CLOSING_BY_PEER,
     CLOSING_BY_HOST,
     CLOSED,
-    INVALID
+    INVALID,    /* Set by accept(), connect() */
+    UNKNOWN     /* Set by microtcp_socket */
 } mircotcp_state_t;
 
 /**
@@ -120,7 +121,7 @@ int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, s
 /**
  * Blocks waiting for a new connection from a remote peer.
  *
- * @param socket the socket structure. Must not be NULL.
+ * @param socket the socket structure.
  * @param address pointer to store the address information of the connected peer
  * @param address_len the length of the address structure.
  * @return ATTENTION despite the original accept() this function returns
