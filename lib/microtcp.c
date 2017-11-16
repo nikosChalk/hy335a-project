@@ -138,14 +138,43 @@ static microtcp_header_t microtcp_header();
 /*******************************************************************/
 
 microtcp_sock_t microtcp_socket (int domain, int type, int protocol) {
-    /* Your code here */
-    /* Na thethei to state tou socket se UNKNOWN */
-    /* init all fields. pointers and seq_nunmber should be set to NULL and 0 accordingly */
+    microtcp_sock_t new_socket;
+
+    /*initialize all fields*/
+    new_socket.state = UNKNOWN;
+    new_socket.init_win_size = 0;
+    new_socket.curr_win_size = 0;
+    new_socket.recvbuf = NULL;
+    new_socket.buf_length = 0;
+    new_socket.buf_fill_level = 0;
+    new_socket.cwnd = 0;
+    new_socket.ssthresh = 0;
+    new_socket.seq_number = 0;
+    new_socket.ack_number = 0;
+    new_socket.peer_seq_number = 0;
+
+    new_socket.peer_sin = NULL;
+    new_socket.statistics = NULL;
+
+    /*check for errors*/
+    if((socket(domain, type, protocol)) == -1) {
+        LOG_ERROR("Socket creation failed!");
+        perror(NULL);
+        new_socket.state = INVALID;
+    } else{
+        new_socket.sd = socket(domain, type, protocol);
+    }
+    retrun new_socket;
 }
 
 int microtcp_bind (microtcp_sock_t *socket, const struct sockaddr *address, socklen_t address_len) {
-    /* Your code here */
-    /* Na thetei to state tou socket se BINDED iff htan UNKNOWN prin.*/
+    if(socket->state == UNKNOWN && bind(socket->sd, address, address_len) == 0) {
+        socket->state = BINDED;
+        return 0;
+    } else{
+        LOG_ERROR("The socket's state is not unknown OR bind failed!");
+        return -1;
+    }
 }
 
 int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, socklen_t address_len) {
@@ -295,6 +324,8 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
     /* Your code here */
     /* threshold_rcvfrom() should be used instead of rcvfrom() */
+
+    if()
 }
 
 static void acquire_sock_resources(microtcp_sock_t *socket) {
