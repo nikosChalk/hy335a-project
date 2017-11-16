@@ -195,7 +195,7 @@ int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, s
     socket->buf_fill_level = 0;
 
     if(sendACK(socket, 0) == -1) {  /* Not a critical issue. The (server) user will call microtcp_rcv() which will re-dispatch this ACK */
-        LOG_WARN("Failed to dispatch ACK packet during 3-way handshake.");
+        LOG_WARN("Failed to send ACK packet during 3-way handshake.");
         perror(NULL);
     }
     return 0;
@@ -275,8 +275,21 @@ int microtcp_shutdown (microtcp_sock_t *socket, int how) {
 }
 
 ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length, int flags) {
-    /* Your code here */
-    /* Make header and call microtcp_send_packet() */
+    microtcp_header_t header;
+
+    if(!socket) {
+        LOG_ERROR("NULL socket passed");
+        return -1;
+    } else if(socket->state != ESTABLISHED) {
+        LOG_ERROR("Socket has invalid state");
+        return -1;
+    }
+
+    header = microtcp_header();
+    header.seq_number = socket->seq_number + (sizeof(microtcp_header_t) + length);
+    header.ack_number = socket->ack_number;
+    header.data_len = length;
+    return microtcp_send_packet(socket, &header, buffer, length, flags);
 }
 
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
@@ -307,20 +320,34 @@ static microtcp_header_t microtcp_header() {
     return header;
 }
 
+/**
+ * Same as microtcp_send() except that one passes both the header and the data to be sent. There is no restriction for
+ * the socket->state in order for the packet to be sent. It is assumed that socket->peer_sin holds valid information.
+ * Note that just as microtcp_send(), this function blocks until the appropriate ACKs have been received and the whole
+ * packet (header + data_buffer) has been sent.
+ * The fields of seq_number, ack_number and peer_seq_number of socket as well as statistics are updated through out the whole process.
+ * All received ACK packets will be placed within socket->recvbuf in NETWORK Byte Order.
+ * @param header The header which is sent that along the packet. Note that the header must be in HOST Byte Order
+ * @param data_buffer The data_buffer, just as microtcp_send(). The data_buffer must be in NETWORK Byte Order. If data_buffer
+ * is NULL, then only the header of the packet is sent.
+ */
 static ssize_t microtcp_send_packet(microtcp_sock_t *socket, const microtcp_header_t *header, const void *data_buffer, size_t data_length, int flags) {
     /* Header does not need to be in Network Byte Order. It will be automatically converted in here */
     /* However, data_buffer must be in Network Byte Order. */
+    static int flag;
+    int max_packet_size = MICROTCP_RECVBUF_LEN/2;
+    int tmp = sizeof(max_packet_size);
+    if(getsockopt(socket->sd, SOL_SOCKET, SO_SNDBUF, &max_packet_size, (socklen_t *)&tmp) == -1) {   /* Will not change max_packet_size on error */
+        LOG_ERROR("Error while reading data length for sending a datagram");
+        perror(NULL);
+    }
+
+    getsockopt(socket->sd, )SO_MAX_MSG_SIZE
     microtcp_header_t network_header = *header;
     hton_header(&network_header);
-    /* Fragment packets with data bigger than MICROTCP_RECVBUF_LEN-sizeof(header)-1?. */
-    /* Check also if socket has ESTABLISHED state */
-    /* Should deal with NULL data_buffer since that indicates that the packet is only a header */
+
+    /* If length+sizeof(header) > SO_MAX_MSG_SIZE  as returned by sockopt(), the packet will be fragmented into multiple ones. */
     /* threshold_sendto() should be used instead of sendto() */
-    /* must block until ACK is received. Will wait for an ack */
-    /* ACK packets received, WILL be placed within socket->recvbuf (storing header only, since ACK have no data), */
-    /* since they may contain useful information for the caller.  */
-    /* data written in socket->recvbuf are in Network Byte Order */
-    /* Will also updade seq_number and ack_number of socket due to ACK packet being received */
 }
 
 static ssize_t sendACK(microtcp_sock_t *socket, int flags) {
