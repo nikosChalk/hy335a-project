@@ -86,9 +86,9 @@ typedef struct {
     size_t cwnd;
     size_t ssthresh;
 
-    size_t seq_number;            /**< Keep the state of the sequence number */
-    size_t ack_number;            /**< Keep the state of the ack number */
-    size_t peer_seq_number ;      /* Peer's last received sequence number. */
+    uint32_t seq_number;            /**< Keep the state of the sequence number */
+    uint32_t ack_number;            /**< Keep the state of the ack number */
+    uint32_t peer_seq_number;      /* Peer's last received sequence number. */
 
     struct sockaddr_in *peer_sin;    /* Peer's address and port so that we can remember him when accept and connect are called */
     microtcp_sock_statistics_t *statistics;  /* Statistics of the microtcp socket */

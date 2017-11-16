@@ -98,10 +98,18 @@ static ssize_t threshold_sendto(int sd, const void *buf, size_t len, int flags, 
 static ssize_t threshold_recvfrom(int sd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen, microtcp_sock_statistics_t *statistics);
 
 /**
- * Same as microtcp_send() except that one passes both the header and the data to be sent. If data_buffer is NULL, then
- * only the header of the packet is sent.
+ * Same as microtcp_send() except that one passes both the header and the data to be sent. There is no restriction for
+ * the socket->state in order for the packet to be sent. It is assumed that socket->peer_sin holds valid information.
+ * Note that just as microtcp_send(), this function blocks until the appropriate ACKs have been received and the whole
+ * packet (header + data_buffer) has been sent.
+ * The fields of seq_number, ack_number and peer_seq_number of socket as well as statistics are updated through out the whole process.
+ * All received ACK packets will be placed within socket->recvbuf in NETWORK Byte Order.
+ * @param header The header which is sent that along the packet. Note that the header must be in HOST Byte Order. Overmore,
+ * the function sets approprietly the header's seq_number, ack_number, data_len and check_sum
+ * @param data_buffer The data_buffer, just as microtcp_send(). The data_buffer must be in NETWORK Byte Order. If data_buffer
+ * is NULL, then only the header of the packet is sent and data_length is ignored.
  */
-static ssize_t microtcp_send_packet(microtcp_sock_t *socket, const microtcp_header_t *header, const void *data_buffer, size_t data_length, int flags);
+static ssize_t microtcp_send_packet(microtcp_sock_t *socket, microtcp_header_t header, const void *data_buffer, size_t data_length, int flags);
 
 /**
  * Sends an ACK packet to the peer that socket is connected to, without any data (only the header is sent). Note that
@@ -289,7 +297,7 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
     header.seq_number = socket->seq_number + (sizeof(microtcp_header_t) + length);
     header.ack_number = socket->ack_number;
     header.data_len = length;
-    return microtcp_send_packet(socket, &header, buffer, length, flags);
+    return microtcp_send_packet(socket, header, buffer, length, flags);
 }
 
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
@@ -320,34 +328,58 @@ static microtcp_header_t microtcp_header() {
     return header;
 }
 
-/**
- * Same as microtcp_send() except that one passes both the header and the data to be sent. There is no restriction for
- * the socket->state in order for the packet to be sent. It is assumed that socket->peer_sin holds valid information.
- * Note that just as microtcp_send(), this function blocks until the appropriate ACKs have been received and the whole
- * packet (header + data_buffer) has been sent.
- * The fields of seq_number, ack_number and peer_seq_number of socket as well as statistics are updated through out the whole process.
- * All received ACK packets will be placed within socket->recvbuf in NETWORK Byte Order.
- * @param header The header which is sent that along the packet. Note that the header must be in HOST Byte Order
- * @param data_buffer The data_buffer, just as microtcp_send(). The data_buffer must be in NETWORK Byte Order. If data_buffer
- * is NULL, then only the header of the packet is sent.
- */
-static ssize_t microtcp_send_packet(microtcp_sock_t *socket, const microtcp_header_t *header, const void *data_buffer, size_t data_length, int flags) {
+static ssize_t microtcp_send_packet(microtcp_sock_t *socket, microtcp_header_t header, const void *data_buffer, size_t data_length, int flags) {
     /* Header does not need to be in Network Byte Order. It will be automatically converted in here */
     /* However, data_buffer must be in Network Byte Order. */
-    static int flag;
-    int max_packet_size = MICROTCP_RECVBUF_LEN/2;
-    int tmp = sizeof(max_packet_size);
-    if(getsockopt(socket->sd, SOL_SOCKET, SO_SNDBUF, &max_packet_size, (socklen_t *)&tmp) == -1) {   /* Will not change max_packet_size on error */
-        LOG_ERROR("Error while reading data length for sending a datagram");
-        perror(NULL);
+    size_t max_data_length = socket->buf_length - sizeof(microtcp_header_t) - 1;    /* For fragmentation */
+    size_t rest_data = data_length;
+    size_t to_send_data_length;
+    uint8_t *to_send_buffer = calloc((sizeof(microtcp_header_t) + max_data_length), sizeof(uint8_t));
+    ssize_t bytes_sent;
+    microtcp_header_t to_send_header = microtcp_header();
+
+    /* TODO: Check that this function is written properly */
+    /* TODO: Check everyone who calls it */
+
+    LOG_INFO("Sending user packet with data length: %zu", data_length);
+    while(data_buffer && rest_data != 0) {
+        if(rest_data > max_data_length) {
+            LOG_INFO("User's data are too many to fit into one packet. Fragmenting...");
+            to_send_data_length = max_data_length;
+        } else {
+            to_send_data_length = rest_data;
+        }
+
+        /* Create Header */
+        header.seq_number = socket->seq_number + sizeof(microtcp_header_t) + to_send_data_length;
+        header.ack_number = socket->ack_number;
+        header.data_len = (uint32_t )rest_data; /* The sender will never request a packet of 4GB to be sent... */
+        /* TODO: header.checksum = ... */
+        set_ack(&header, 1);
+
+        /* Change header bytes to Network Byte Order */
+        memcpy(&to_send_header, &header, sizeof(microtcp_header_t));
+        hton_header(&to_send_header);
+
+        /* Copy header + data to a seamless continious buffer */
+        memcpy(to_send_buffer, &to_send_header, sizeof(microtcp_header_t));
+        memcpy((to_send_buffer + sizeof(microtcp_header_t)), data_buffer, to_send_data_length);
+
+        bytes_sent = threshold_sendto(socket->sd, to_send_buffer, (to_send_data_length + sizeof(microtcp_header_t)), flags,
+                                      (struct sockaddr*)socket->peer_sin, sizeof(*socket->peer_sin), socket->statistics);
+        if(bytes_sent == -1) {
+            free(to_send_buffer);
+            return -1;
+        }
+        rest_data -= bytes_sent;
+        data_buffer = ((uint8_t *)data_buffer + bytes_sent);   /* Since bytes_sent were successfully sent, move the pointer */
+        socket->seq_number += bytes_sent;
+
+        /*TODO: wait for ACK packet */
+        /*TODO: retransmit if ACK has not been */
     }
-
-    getsockopt(socket->sd, )SO_MAX_MSG_SIZE
-    microtcp_header_t network_header = *header;
-    hton_header(&network_header);
-
-    /* If length+sizeof(header) > SO_MAX_MSG_SIZE  as returned by sockopt(), the packet will be fragmented into multiple ones. */
-    /* threshold_sendto() should be used instead of sendto() */
+    free(to_send_buffer);
+    return 0;
 }
 
 static ssize_t sendACK(microtcp_sock_t *socket, int flags) {
