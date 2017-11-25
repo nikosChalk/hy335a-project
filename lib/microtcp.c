@@ -427,8 +427,9 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
 }
 
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
-    /* Your code here */
-
+    while(n = threshold_recvfrom(socket->sd,socket->recvbuf,socket->buf_length,flags,socket->peer_sin, sizeof(socket->peer_sin),socket->statistics)){
+        if(socket->statistics->bytes_received == socket->peer_seq_number + n)
+    }
 }
 
 static void acquire_sock_resources(microtcp_sock_t *socket) {
