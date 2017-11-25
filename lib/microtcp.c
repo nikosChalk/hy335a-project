@@ -172,7 +172,7 @@ microtcp_sock_t microtcp_socket (int domain, int type, int protocol) {
     } else{
         new_socket.sd = socket(domain, type, protocol);
     }
-    retrun new_socket;
+    return new_socket;
 }
 
 int microtcp_bind (microtcp_sock_t *socket, const struct sockaddr *address, socklen_t address_len) {
@@ -330,10 +330,10 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
 }
 
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
-    /* Your code here */
-    /* threshold_rcvfrom() should be used instead of rcvfrom() */
 
-    if()
+    while(n = threshold_recvfrom(socket->sd,socket->recvbuf,socket->buf_length,flags,socket->peer_sin, sizeof(socket->peer_sin),socket->statistics)){
+        if(socket->statistics->bytes_received == socket->peer_seq_number + n)
+    }
 }
 
 static void acquire_sock_resources(microtcp_sock_t *socket) {
