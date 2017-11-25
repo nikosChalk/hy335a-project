@@ -131,6 +131,10 @@ int microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address, socklen_
 
 int microtcp_shutdown(microtcp_sock_t *socket, int how);
 
+/**
+ * Same as man 2 send(). Note that only up to MICROTCP_MSS data bytes will be sent. Fragmentation of larger payloads
+ * should be taken care of by the user.
+ */
 ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length, int flags);
 
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags);

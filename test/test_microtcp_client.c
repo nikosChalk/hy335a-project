@@ -1,22 +1,9 @@
-/*
- * microtcp, a lightweight implementation of TCP for teaching,
- * and academic purposes.
- *
- * Copyright (C) 2015-2017  Manolis Surligas <surligas@gmail.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+
+
+#include <netinet/in.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include "../lib/microtcp.h"
 
 /*
  * You can use this file to write a test microTCP client.
@@ -24,5 +11,20 @@
  */
 
 int main(int argc, char **argv) {
+    microtcp_sock_t socket = microtcp_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    struct sockaddr_in connect_to_sin;
+    struct sockaddr_in listen_sin;
+    memset(&listen_sin, 0, sizeof(struct sockaddr_in));
+    memset(&connect_to_sin, 0, sizeof(struct sockaddr_in));
 
+    listen_sin.sin_family = AF_INET;
+    listen_sin.sin_port = htons(30000);
+    inet_aton("127.0.0.1", &listen_sin.sin_addr);
+
+    connect_to_sin.sin_family = AF_INET;
+    connect_to_sin.sin_port = htons(40000);
+    inet_aton("127.0.0.1", &connect_to_sin.sin_addr);
+
+    microtcp_bind(&socket, (struct sockaddr *)&listen_sin, sizeof(listen_sin));
+    microtcp_connect(&socket, (struct sockaddr *)&connect_to_sin, sizeof(connect_to_sin));
 }

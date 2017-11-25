@@ -25,11 +25,13 @@ add_executable(traffic_generator_client traffic_generator_client.c)
 add_executable(traffic_generator traffic_generator.cpp)
 add_executable(test_microtcp_server test_microtcp_server.c)
 add_executable(test_microtcp_client test_microtcp_client.c)
+add_executable(test_bits test_bits.c)
 
 target_link_libraries(bandwidth_test microtcp)
 target_link_libraries(test_microtcp_server microtcp)
 target_link_libraries(test_microtcp_client microtcp)
 target_link_libraries(traffic_generator microtcp)
 target_link_libraries(traffic_generator_client microtcp)
+target_link_libraries(test_bits microtcp)
 
 install(TARGETS bandwidth_test DESTINATION bin)

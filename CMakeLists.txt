@@ -27,7 +27,7 @@ set (CMAKE_CXX_STANDARD 11)
 
 # Enable all warnings during compilation, hoping that this will be 
 # helpful for the students :)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wextra")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wextra -std=c++11")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wextra")
 
 set (microtcp_version_major 1)
