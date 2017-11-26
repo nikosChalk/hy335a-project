@@ -258,8 +258,24 @@ int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, s
     if(!socket || !address) {
         LOG_ERROR("socket and address must not be NULL");
         return  -1;
+    } else if(socket->state == UNKNOWN) {   /* Bind was not previously called. Socket must be binded to all available interfaces and in a random port */
+        struct sockaddr_in host_sin;
+        socklen_t host_addr_len;
+
+        LOG_INFO("Connect invoked without having the socket binded. Binding the socket...");
+        memset(&host_sin, 0, sizeof(host_sin));
+        host_sin.sin_family = AF_INET;
+        host_sin.sin_port = htons(0);   /* Bind to some available port defined by OS */
+        host_sin.sin_addr.s_addr = INADDR_ANY;  /*  Bind to all available interfaces */
+        host_addr_len = sizeof(host_sin);
+
+        if(microtcp_bind(socket, (struct sockaddr*)(&host_sin), host_addr_len) == -1) {
+            LOG_ERROR("Could not bind socket. Connect failed.");
+            perror(NULL);
+            return -1;
+        }
     } else if(socket->state != BINDED) {
-        LOG_ERROR("Could not connect to remote host. Socket is not binded.");
+        LOG_ERROR("Could not connect to remote host. Invalid socket state.");
         return -1;
     }
 
@@ -581,7 +597,7 @@ static ssize_t send_header(microtcp_sock_t *socket, uint8_t ack, uint32_t ack_nu
     set_fin(&host_header, fin);
     if(is_ack(&host_header))
         host_header.ack_number = ack_number;
-    host_header.seq_number = (is_syn(&host_header)) ? (rand() % UINT32_MAX) : (socket->seq_number + sizeof(microtcp_header_t));
+    host_header.seq_number = (is_syn(&host_header)) ? (rand() % UINT32_MAX/2) : (socket->seq_number + sizeof(microtcp_header_t));   /* Divided by 2 in order to avoid rare overflows */
 
     memcpy(&netwrok_header, &host_header, sizeof(microtcp_header_t));
     hton_header(&netwrok_header);
