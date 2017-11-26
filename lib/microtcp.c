@@ -263,7 +263,7 @@ int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, s
 
     /* Acquiring resources and sendind SYN packet */
     acquire_sock_resources(socket);
-    memcpy(socket->peer_sin, (struct sockaddr_in *)address, address_len);           /* TODO: /******* EXPECT BUUUUGS???? *******/
+    memcpy(socket->peer_sin, (struct sockaddr_in *)address, address_len);
 
     /* Sending SYN packet*/
     LOG_INFO("Attempting connection to IP address \"%s\" in port %u", inet_ntoa(socket->peer_sin->sin_addr), ntohs(socket->peer_sin->sin_port));
