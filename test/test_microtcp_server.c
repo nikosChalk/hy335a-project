@@ -29,4 +29,5 @@ int main(int argc, char **argv) {
     while((bytes_received = microtcp_recv(&socket, data_buffer, 1000, 0)) > 0) {
         printf("Message Received: %s\n", data_buffer);
     }
+    microtcp_shutdown(&socket, SHUT_RDWR);
 }

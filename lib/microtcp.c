@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <float.h>
+#include <inttypes.h>
 #include <assert.h>
 #include <arpa/inet.h>
 #include "microtcp.h"
@@ -16,6 +18,14 @@
 /****************************************************************/
 /********************* FORWARD DECLARATIONS *********************/
 /****************************************************************/
+
+/**
+ * Calculates the time difference between the two given points in time
+ * @param end_time The ending time. Must not be NULL.
+ * @param start_time The starting time. Must not be NULL.
+ * @return the end_time - start_time in seconds
+ */
+static double get_time_diff(struct timespec const *end_time, struct timespec const *start_time);
 
 /**
  * Converts the byte order of each field of header, from Network Byte Order
@@ -185,14 +195,19 @@ static ssize_t send_header(microtcp_sock_t *socket, uint8_t ack, uint32_t ack_nu
 
 /**
  * Releases any dynamically allocated resources that this socket has aquired. Note that this function assumes that
- * socket has already aquired valid resources. Also sets the state of this socket to INVALID.
+ * socket has already aquired valid resources.
  * @param socket The socket whose resources will be released. Must not be NULL.
  */
 static void release_sock_resources(microtcp_sock_t *socket);
 
 /**
- * Acquires dynamic resources that this socket needs. Note that this function assumes that the socket does not already
+ * Acquires dynamic resources that this socket needs. All dynamically allocated resources are initialized to zero.
+ * Note that this function assumes that the socket does not already
  * own any resources in order to avoid memory leaks. The state of the socket is unaffected.
+ *
+ * socket->statistics->rx_max_inter and socket->statistics->tx_max_inter are initialized to -1;
+ * socket->statistics->rx_min_inter and socket->statistics->tx_min_inter are initialized to DBL_MAX;
+ * Rest fields of socket->statistics are initialized to 0, normaly.
  * @param socket The socket whose resources will be acquired. Must not be NULL.
  */
 static void acquire_sock_resources(microtcp_sock_t *socket);
@@ -200,10 +215,9 @@ static void acquire_sock_resources(microtcp_sock_t *socket);
 /**
  * Displays the statistics of this socket from the point when a peer was connected to it, until now.
  * Statistics are dumped in stdout
- * @param socket The socket whose statistics will be displayed. Must not be NULL and socket->statistics must hold valid
- * information.
+ * @param sock_statistics The socket's statistics which will be displayed. Must not be NULL.
  */
-static void display_statistics(microtcp_sock_t const *socket);
+static void display_statistics(microtcp_sock_statistics_t *sock_statistics);
 
 /**
  * Creates a microtcp_header_t and initializes every field to 0.
@@ -302,6 +316,7 @@ int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, s
         LOG_ERROR("Failed to dispatch SYN packet. Aborting connection to remote host.");
         perror(NULL);
         release_sock_resources(socket);
+        socket->state = INVALID;
         return -1;
     }
     LOG_INFO("SYN packet sent with sequence number: %u.", socket->seq_number);
@@ -312,6 +327,7 @@ int microtcp_connect (microtcp_sock_t *socket, const struct sockaddr *address, s
         LOG_ERROR("Error while receiving SYN ACK header. Connection aborted");
         perror(NULL);
         release_sock_resources(socket);
+        socket->state = INVALID;
         return -1;
     }
     peer_header = get_last_packet_ptr(socket, (size_t)bytes_received);
@@ -357,6 +373,7 @@ int microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address, socklen_
             LOG_ERROR("Waiting for connection failed:");
             perror(NULL);
             release_sock_resources(socket);
+            socket->state = INVALID;
             return -1;
         }
 
@@ -386,6 +403,7 @@ int microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address, socklen_
         LOG_ERROR("Attempted to send SYN, ACK but failed:");
         perror(NULL);
         release_sock_resources(socket);
+        socket->state = INVALID;
         return -1;
     }
     LOG_INFO("SYN ACK packet sent with seq_number %u and ack_number ...", socket->seq_number); /* TODO: add ack number */
@@ -396,6 +414,7 @@ int microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address, socklen_
         LOG_ERROR("Error while receiving ACK packet:");
         perror(NULL);
         release_sock_resources(socket);
+        socket->state = INVALID;
         return -1;
     }
     peer_header = get_last_packet_ptr(socket, (size_t)bytes_received);
@@ -453,7 +472,7 @@ int microtcp_shutdown (microtcp_sock_t *socket, int how) {
         peer_header = get_last_packet_ptr(socket, (size_t)bytes_received);
         socket->peer_seq_number = peer_header->seq_number;   /* TODO: Do not ignore packet losses? */
         socket->buf_fill_level -= bytes_received;
-        LOG_INFO("FIN ACK packet received with seq_number %u and ack_number ... ", );    /* TODO: ACK number */
+        LOG_INFO("FIN ACK packet received with seq_number %u and ack_number ... ", peer_header->seq_number);    /* TODO: ACK number */
 
         /* Sending ACK */
         if(send_header(socket, 1, 0, 0, 0, 0, 0) == -1) {
@@ -466,7 +485,7 @@ int microtcp_shutdown (microtcp_sock_t *socket, int how) {
 
         LOG_INFO("Connection successfully terminated");
         LOG_INFO("Statistics:");
-        display_statistics(socket);
+        display_statistics(socket->statistics);
 
         release_sock_resources(socket);
         shutdown(socket->sd, SHUT_RDWR);
@@ -474,7 +493,7 @@ int microtcp_shutdown (microtcp_sock_t *socket, int how) {
         socket->state = CLOSED;
         return 0;
 
-    } else if(socket->state == CLOSING_BY_PEER) {
+    } else if(socket->state == CLOSING_BY_PEER) {   /* Peer requested shutdown and user called shutdown */
         /* Sending FIN, ACK */
         LOG_INFO("Sending FIN, ACK header...");
         if(send_header(socket, 1, 0, 0, 0, 1, 0) == -1) {
@@ -498,18 +517,25 @@ int microtcp_shutdown (microtcp_sock_t *socket, int how) {
 
         LOG_INFO("Connection successfully terminated");
         LOG_INFO("Statistics:");
-        display_statistics(socket);
+        display_statistics(socket->statistics);
 
         release_sock_resources(socket);
         shutdown(socket->sd, SHUT_RDWR);
         close(socket->sd);
         socket->state = CLOSED;
         return 0;
+    } else {
+        LOG_ERROR("Invalid call to shutdown. Socket is not in state ESTABLISHED nor in state CLOSING_BY_PEER.");
+        return -1;
     }
-    /* TODO... */
 }
 
-ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length, int flags) {
+ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length, int flags) {
+    static struct timespec last_call_time;
+    static struct timespec cur_call_time;
+    static int isFirstCall = 1;
+    double time_diff;
+
     microtcp_header_t header = microtcp_header();
     ssize_t bytes_sent;
 
@@ -521,9 +547,15 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
         return -1;
     }
 
-    if(length > MICROTCP_MSS) {
+    /*
+    if(length > MICROTCP_MSS) { /*TODO: ask TA for fragmentation
         LOG_INFO("User requested %zu bytes to be send. Max payload is %d. %u bytes discarded.", length, MICROTCP_MSS, (MICROTCP_MSS-length));
         length = MICROTCP_MSS;
+    }
+    */
+    if(length > MICROTCP_RECVBUF_LEN-32) {
+        LOG_INFO("User requested %zu bytes to be send. Max payload is %d. %u bytes discarded.", length, (MICROTCP_RECVBUF_LEN-32), (length - (MICROTCP_RECVBUF_LEN-32)));
+        length = MICROTCP_RECVBUF_LEN-32;
     }
 
     /* Create Header */
@@ -540,17 +572,44 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
         return -1;
     }
 
+    /* For statistics */
+    if(isFirstCall) {
+        clock_gettime(CLOCK_MONOTONIC_RAW, &last_call_time);
+        isFirstCall = 0;
+    } else {
+        clock_gettime(CLOCK_MONOTONIC_RAW, &cur_call_time);
+        time_diff = get_time_diff(&cur_call_time, &last_call_time);
+        socket->statistics->tx_min_inter = (time_diff < socket->statistics->tx_min_inter) ? (time_diff) : socket->statistics->tx_min_inter;
+        socket->statistics->tx_max_inter = (time_diff > socket->statistics->tx_max_inter) ? (time_diff) : socket->statistics->tx_max_inter;
+        socket->statistics->tx_mean_inter += time_diff;
+
+        memcpy(&last_call_time, &cur_call_time, sizeof(cur_call_time));
+    }
+
     /* TODO: checksum? */
     /* TODO: receive ACK */
     /* TODO: retransmit if ACK has not been received */
-    return bytes_sent;
+    return bytes_sent-sizeof(microtcp_header_t);    /* It is always guranteed that sizeof(microtcp_header_t) will be sent */
 }
 
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
+    static struct timespec last_call_time;
+    static struct timespec cur_call_time;
+    static int isFirstCall = 1;
+    double time_diff;
+
     ssize_t bytes_received;
     microtcp_header_t *header_pointer;
     int is_fin_header;
     void *data_pointer;
+
+    if(!socket) {
+        LOG_ERROR("NULL socket passed");
+        return -1;
+    } else if(socket->state != ESTABLISHED) {
+        LOG_ERROR("Socket has invalid state");
+        return -1;
+    }
 
     LOG_INFO("Waiting for packet...");
     bytes_received = threshold_recv(socket,flags);
@@ -559,6 +618,22 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
         perror(NULL);
         return -1;
     }
+
+    /* For statistics */
+    if(isFirstCall) {
+        clock_gettime(CLOCK_MONOTONIC_RAW, &last_call_time);
+        isFirstCall = 0;
+    } else {
+        clock_gettime(CLOCK_MONOTONIC_RAW, &cur_call_time);
+        time_diff = get_time_diff(&cur_call_time, &last_call_time);
+        socket->statistics->rx_min_inter = (time_diff < socket->statistics->rx_min_inter) ? (time_diff) : socket->statistics->rx_min_inter;
+        socket->statistics->rx_max_inter = (time_diff > socket->statistics->rx_max_inter) ? (time_diff) : socket->statistics->rx_max_inter;
+        socket->statistics->rx_mean_inter += time_diff;
+
+        memcpy(&last_call_time, &cur_call_time, sizeof(cur_call_time));
+    }
+
+    /* Implementation */
     header_pointer = (microtcp_header_t*)socket->recvbuf;
     data_pointer = socket->recvbuf  + sizeof(microtcp_header_t);
 
@@ -574,7 +649,7 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
     socket->buf_fill_level -= bytes_received;
 
     if(is_fin_header) {    /* Received FIN while waiting for data. Shutting down connection */
-        LOG_INFO("Pack received was FIN. Replying with ACK...");
+        LOG_INFO("Packet received was FIN. Replying with ACK...");
         if(send_header(socket, 1, 0, 0, 0, 0, 0) == -1) {
             LOG_ERROR("Failed to send ACK header in response to FIN.");
             perror(NULL);
@@ -588,7 +663,7 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
 
     /* TODO: checksum? */
     /* TODO: wait for re-transmission in case of different seq_number?*/
-    return bytes_received;
+    return bytes_received-sizeof(microtcp_header_t); /* It is always guaranteed that at least sizeof(microtcp_header_t) bytes will be received */
 }
 
 static void acquire_sock_resources(microtcp_sock_t *socket) {
@@ -598,6 +673,9 @@ static void acquire_sock_resources(microtcp_sock_t *socket) {
 
     socket->statistics = calloc(1, sizeof(*socket->statistics));    /* Memory initialized to 0 */
     socket->peer_sin = calloc(1, sizeof(*socket->peer_sin));       /* This is a struct sockaddr_in. It MUST be initialized to zero. */
+
+    socket->statistics->rx_max_inter = socket->statistics->tx_max_inter = -1;
+    socket->statistics->rx_min_inter = socket->statistics->tx_min_inter = DBL_MAX;
 }
 
 static void release_sock_resources(microtcp_sock_t *socket) {
@@ -605,7 +683,6 @@ static void release_sock_resources(microtcp_sock_t *socket) {
     free(socket->recvbuf);
     free(socket->peer_sin);
     free(socket->statistics);
-    socket->state = INVALID;
 }
 
 static microtcp_header_t microtcp_header() {
@@ -614,8 +691,30 @@ static microtcp_header_t microtcp_header() {
     return header;
 }
 
-static void display_statistics(microtcp_sock_t const *socket) {
-    /* TODO: implement...*/
+static void display_statistics(microtcp_sock_statistics_t *sock_statistics) {
+    if(sock_statistics->tx_max_inter == -1) /* Field has its initial value. No more than 1 data packet was sent. */
+        sock_statistics->tx_min_inter = sock_statistics->tx_max_inter = 0;
+
+    if(sock_statistics->rx_max_inter == -1) /* Field has its initial value. No more than 1 data packet was received. */
+        sock_statistics->rx_min_inter = sock_statistics->rx_max_inter = 0;
+
+    sock_statistics->rx_mean_inter /= (sock_statistics->packets_received -1);
+    sock_statistics->tx_mean_inter /= (sock_statistics->packets_send -1);
+
+    printf("Packets received \t: %" PRIu64 "\n", sock_statistics->packets_received);
+    printf("Packets sent \t\t: %" PRIu64 "\n", sock_statistics->packets_send);
+    printf("Packets lost \t\t: %" PRIu64 "\n", sock_statistics->packets_lost);
+    printf("Packet lost ratio \t: %.6lf %%\n", ((sock_statistics->packets_lost*100)/((double)sock_statistics->packets_received)));
+    printf("Packet inter-arrival RX\n");
+    printf("Min \t\t\t: %.6lf\n", sock_statistics->rx_min_inter);
+    printf("Max \t\t\t: %.6lf\n", sock_statistics->rx_max_inter);
+    printf("Mean \t\t\t: %.6lf\n", sock_statistics->rx_mean_inter);
+    printf("Std^2 (Variance)\t: ...\n");
+    printf("Packet inter-arrival TX\n");
+    printf("Min \t\t\t: %.6lf\n", sock_statistics->tx_min_inter);
+    printf("Max \t\t\t: %.6lf\n", sock_statistics->tx_max_inter);
+    printf("Mean \t\t\t: %.6lf\n", sock_statistics->tx_mean_inter);
+    printf("Std^2 (Variance)\t: ...\n");
 }
 
 static ssize_t threshold_recvfrom(int sd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen) {
@@ -711,7 +810,8 @@ static ssize_t threshold_send(microtcp_sock_t *socket, microtcp_header_t const *
     microtcp_header_t to_send_header = microtcp_header();
     uint8_t *to_send_buffer = calloc((sizeof(microtcp_header_t) + data_length), sizeof(uint8_t));
     ssize_t bytes_sent;
-    assert(socket && header && data_buffer && data_length>0 && data_length<MICROTCP_MSS);
+    /* assert(socket && header && data_buffer && data_length>0 && data_length<MICROTCP_MSS); */ /* TODO: ask TA */
+    assert(socket && header && data_buffer && data_length>0 && data_length<MICROTCP_RECVBUF_LEN-32);
 
     /* Change header bytes to Network Byte Order */
     memcpy(&to_send_header, header, sizeof(microtcp_header_t));
@@ -731,7 +831,7 @@ static ssize_t threshold_send(microtcp_sock_t *socket, microtcp_header_t const *
     socket->statistics->packets_send++;
     socket->statistics->bytes_send += bytes_sent;
     free(to_send_buffer);
-    return 0;
+    return bytes_sent;
 }
 
 static ssize_t send_header(microtcp_sock_t *socket, uint8_t ack, uint32_t ack_number, uint8_t rst, uint8_t syn, uint8_t fin, int flags) {
@@ -841,4 +941,10 @@ static void set_syn(microtcp_header_t *header, uint8_t syn_bit) {
 static void set_fin(microtcp_header_t *header, uint8_t fin_bit) {
     assert(header && (fin_bit == 0 || fin_bit == 1));
     set_bit(&(header->control), sizeof(header->control), 1, 7, fin_bit);
+}
+
+static double get_time_diff(struct timespec const *end_time, struct timespec const *start_time) {
+    assert(start_time && end_time);
+    return (double)(end_time->tv_sec - start_time->tv_sec
+    + (end_time->tv_nsec - start_time->tv_nsec) * 1e-9);
 }

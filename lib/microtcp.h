@@ -62,6 +62,15 @@ typedef struct {
     uint64_t bytes_send;
     uint64_t bytes_received;
     uint64_t bytes_lost;
+
+    /* The bellow statistical numbers are stored in seconds */
+    double rx_min_inter;
+    double rx_max_inter;
+    double rx_mean_inter;
+
+    double tx_min_inter;
+    double tx_max_inter;
+    double tx_mean_inter;
 } microtcp_sock_statistics_t;
 
 /**

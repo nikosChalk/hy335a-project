@@ -100,7 +100,7 @@ int main (int argc, char **argv) {
   signal(SIGINT, sig_handler);
 
   /* Create a microtcp socket */
-  sock = microtcp_socket (AF_INET, 0, 0);
+  sock = microtcp_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
  /* TODO: some error checking here ??? */
 
   memset (&sin, 0, sizeof(struct sockaddr_in));

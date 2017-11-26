@@ -219,11 +219,11 @@ int server_microtcp(uint16_t listen_port, const char *file) {
         }
     }
     clock_gettime(CLOCK_MONOTONIC_RAW, &end_time);
-    print_statistics(total_bytes_written, start_time, end_time);
-
     microtcp_shutdown(&socket, SHUT_RDWR);
-    fclose (fp);
-    free (data_buffer);
+
+    print_statistics(total_bytes_written, start_time, end_time);
+    fclose(fp);
+    free(data_buffer);
     return 0;
 }
 
@@ -349,11 +349,11 @@ int client_microtcp (const char *serverip, uint16_t server_port, const char *fil
 
     /* Start sending the data */
     printf ("Starting sending data...\n");
-    while (!feof(fp)) {
+    while(!feof(fp)) {
         bytes_sent = 0;
         items_read = fread(data_buffer, sizeof(*data_buffer), (buf_length/(sizeof(*data_buffer))), fp);
         if(items_read >= 1)
-            bytes_sent = microtcp_send(&socket, data_buffer, buf_length, 0);
+            bytes_sent = microtcp_send(&socket, data_buffer, items_read*sizeof(*data_buffer), 0);
 
         if( (items_read < 1) || (items_read*sizeof(*data_buffer) != (size_t)bytes_sent) ) {
             if(items_read < 1)
@@ -370,7 +370,7 @@ int client_microtcp (const char *serverip, uint16_t server_port, const char *fil
     printf ("Data sent. Terminating...\n");
     microtcp_shutdown(&socket, SHUT_RDWR);
     fclose(fp);
-    free (data_buffer);
+    free(data_buffer);
     return 0;
 }
 

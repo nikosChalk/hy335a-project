@@ -25,6 +25,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "../lib/microtcp.h"
 #include "../utils/log.h"
@@ -48,6 +50,7 @@ int main(int argc, char **argv) {
     struct sockaddr_in server_address;
     socklen_t server_address_len;
     int ret;
+    ssize_t ret_recv;
     char buffer[BUF_LEN];
     struct timespec start_time;
     struct timespec end_time;
@@ -67,7 +70,7 @@ int main(int argc, char **argv) {
                         "Usage: bandwidth_test [-s] [-m] -p port -f file"
                                 "Options:\n"
                                 "   -p <int>            The listening port of the server\n"
-                                "   -a <string>         The IP address of the server. This option is ignored if the tool runs in server mode.\n"
+                                "   -a <string>         The IP address of the server. This option is ignored if the tool runs in server mode.\n");
                 exit (EXIT_FAILURE);
         }
     }
@@ -85,7 +88,7 @@ int main(int argc, char **argv) {
     memset(&server_address, 0, sizeof(struct sockaddr));
     server_address.sin_family = AF_INET;
     server_address.sin_port = htons(port);
-    server_address.sin_addr.s_addr = ipstr;
+    inet_aton(ipstr, &server_address.sin_addr);
     server_address_len = sizeof(struct sockaddr_in);
     ret = microtcp_connect(&socket,(struct sockaddr *) &server_address,  server_address_len);
 
@@ -96,10 +99,13 @@ int main(int argc, char **argv) {
 
     while(running) {
         clock_gettime(CLOCK_MONOTONIC_RAW, &start_time);
-        microtcp_recv(&socket,buffer, BUF_LEN,0);
+        ret_recv = microtcp_recv(&socket,buffer, BUF_LEN,0);
         clock_gettime(CLOCK_MONOTONIC_RAW, &end_time);
         double elapsed = end_time.tv_sec - start_time.tv_sec + (end_time.tv_nsec - start_time.tv_nsec) * 1e-9;
-        printf("The time is: %d\n", elapsed);
+        printf("%lf\n", elapsed);
+        if(ret_recv == 0){
+            break;
+        }
     }
 
     LOG_INFO("Going to terminate microtcp connection...");

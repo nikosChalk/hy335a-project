@@ -46,4 +46,5 @@ int main(int argc, char **argv) {
         data_buf[hello_world_len] = (char)'0' + i;
         microtcp_send(&socket, data_buf, hello_world_len+2, 0);
     }
+    microtcp_shutdown(&socket, SHUT_RDWR);
 }
