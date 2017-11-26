@@ -230,8 +230,6 @@ microtcp_sock_t microtcp_socket (int domain, int type, int protocol) {
         LOG_ERROR("Socket creation failed!");
         perror(NULL);
         new_socket.state = INVALID;
-    } else {
-        /*new_socket.sd = socket(domain, type, protocol);*/ /* socket() should not be called twice */
     }
     return new_socket;
 }
@@ -443,9 +441,29 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
 }
 
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
-    while(n = threshold_recvfrom(socket->sd,socket->recvbuf,socket->buf_length,flags,socket->peer_sin, sizeof(socket->peer_sin),socket->statistics)){
-        if(socket->statistics->bytes_received == socket->peer_seq_number + n)
+    ssize_t bytes_received;
+    microtcp_header_t *header_pointer;
+    void *data_pointer;
+
+    LOG_INFO("Waiting for packet...");
+    bytes_received = threshold_recv(socket,flags);
+    if(bytes_received == -1){
+        LOG_ERROR("Waiting for packet failed:");
+        perror(NULL);
+        return -1;
     }
+    LOG_INFO("Packet received");
+    header_pointer = (microtcp_header_t*)socket->recvbuf;
+    data_pointer = socket-> recvbuf  + sizeof(header_pointer);
+
+    if(header_pointer->seq_number != socket->peer_seq_number + bytes_received){
+        socket->statistics->packets_lost++;
+        socket->statistics->bytes_lost = header_pointer->seq_number - (socket->peer_seq_number + bytes_received);
+    }
+    socket->peer_seq_number = header_pointer->seq_number;
+    memcpy(buffer, data_pointer, bytes_received - sizeof(microtcp_header_t));
+
+    return bytes_received;
 }
 
 static void acquire_sock_resources(microtcp_sock_t *socket) {
