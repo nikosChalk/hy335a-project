@@ -2,6 +2,7 @@
 
 #include <time.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <assert.h>
 #include <arpa/inet.h>
@@ -124,7 +125,8 @@ static ssize_t threshold_recv(microtcp_sock_t *socket, int flags);
  * these constraints are never stored and are always dropped without altering socket's fields.
  * Once valid header has been received, it is stored within socket->recvbuf and socket->buff_fill_level is
  * updated. The header will be stored in HOST Byte Order. Also when the valid packet is received, bytes_received and packets_received
- * of socket->statistics are updated. Note that the socket->seq_number is left unaffected.
+ * of socket->statistics are updated.
+ * Note that the socket->peer_seq_number are left unaffected.
  * It is guaranteed that at least sizeof(microtcp_header_t) data will be received in case of no error.
  * In error case, the socket is not changed.
  * @param socket The socket which waits for a specific header packet to be received. Must not be NULL and socket->peer_sin is assumed hold
@@ -196,6 +198,14 @@ static void release_sock_resources(microtcp_sock_t *socket);
 static void acquire_sock_resources(microtcp_sock_t *socket);
 
 /**
+ * Displays the statistics of this socket from the point when a peer was connected to it, until now.
+ * Statistics are dumped in stdout
+ * @param socket The socket whose statistics will be displayed. Must not be NULL and socket->statistics must hold valid
+ * information.
+ */
+static void display_statistics(microtcp_sock_t const *socket);
+
+/**
  * Creates a microtcp_header_t and initializes every field to 0.
  * @return A microtcp_header_t header with each field initialized to 0.
  */
@@ -206,7 +216,11 @@ static microtcp_header_t microtcp_header();
 /*******************************************************************/
 
 microtcp_sock_t microtcp_socket (int domain, int type, int protocol) {
-    /* TODO: call srand() once, ONLY for the first call of microtcp_socket(). */
+    static int has_called_srand = 0;
+    if(!has_called_srand) {
+        has_called_srand = 1;
+        srand(time(NULL));
+    }
     microtcp_sock_t new_socket;
 
     /*initialize all fields*/
@@ -400,7 +414,99 @@ int microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address, socklen_
 }
 
 int microtcp_shutdown (microtcp_sock_t *socket, int how) {
-  /* Your code here */
+    microtcp_header_t *peer_header;
+    ssize_t bytes_received, bytes_sent;
+
+    if(socket->state == ESTABLISHED) {    /* User explicitly requests connection termination */
+        LOG_INFO("Connection termination requested by host...");
+
+        /* Send FIN, ACK */
+        LOG_INFO("Sending FIN, ACK header...");
+        if(send_header(socket, 1, 0, 0, 0, 1, 0) == -1) {
+            LOG_ERROR("Error while sending FIN ACK. Shutdown failed.");
+            perror(NULL);
+            return -1;
+        }
+        LOG_INFO("FIN, ACK header sent with seq_number %u", socket->seq_number);
+
+        /* Waiting for ACK */
+        LOG_INFO("Waiting for ACK...");
+        if((bytes_received = recv_header(socket, 1, 0, 0, 0, 0)) == -1) {
+            LOG_ERROR("Error while waiting for ACK. Shutdown failed.");
+            perror(NULL);
+            return -1;
+        }
+        peer_header = get_last_packet_ptr(socket, (size_t)bytes_received);
+        socket->peer_seq_number = peer_header->seq_number;   /* TODO: Do not ignore packet losses? */
+        socket->buf_fill_level -= bytes_received;
+        socket->state = CLOSING_BY_HOST;
+        LOG_INFO("ACK packet received with seq_number %u and ack_number ...", socket->seq_number);    /* TODO: ACK number */
+
+        /* Waiting for FIN ACK */
+        LOG_INFO("Waiting for FIN ACK...");
+        if((bytes_received = recv_header(socket, 1, 0, 0, 1, 0)) == -1) {
+            LOG_ERROR("Error while receiving FIN ACK packet. Connection terminated forcefully.");
+            perror(NULL);
+            /* TODO: release sock resources. Display statistics */
+            return -1;
+        }
+        peer_header = get_last_packet_ptr(socket, (size_t)bytes_received);
+        socket->peer_seq_number = peer_header->seq_number;   /* TODO: Do not ignore packet losses? */
+        socket->buf_fill_level -= bytes_received;
+        LOG_INFO("FIN ACK packet received with seq_number %u and ack_number ... ", );    /* TODO: ACK number */
+
+        /* Sending ACK */
+        if(send_header(socket, 1, 0, 0, 0, 0, 0) == -1) {
+            LOG_ERROR("Error sending ACK. Connection terminated forcefully.");
+            perror(NULL);
+            /* TODO: release sock resources. Display statistics */
+            return -1;
+        }
+        LOG_INFO("ACK packet sent with seq_number %u and ack_number ...", socket->seq_number);    /* TODO: ACK number */
+
+        LOG_INFO("Connection successfully terminated");
+        LOG_INFO("Statistics:");
+        display_statistics(socket);
+
+        release_sock_resources(socket);
+        shutdown(socket->sd, SHUT_RDWR);
+        close(socket->sd);
+        socket->state = CLOSED;
+        return 0;
+
+    } else if(socket->state == CLOSING_BY_PEER) {
+        /* Sending FIN, ACK */
+        LOG_INFO("Sending FIN, ACK header...");
+        if(send_header(socket, 1, 0, 0, 0, 1, 0) == -1) {
+            LOG_ERROR("Error while sending FIN ACK. Shutdown failed.");
+            perror(NULL);
+            return -1;
+        }
+        LOG_INFO("FIN, ACK header sent with seq_number %u", socket->seq_number);
+
+        /* Waiting for ACK */
+        LOG_INFO("Waiting for ACK...");
+        if((bytes_received = recv_header(socket, 1, 0, 0, 0, 0)) == -1) {
+            LOG_ERROR("Error while waiting for ACK. Shutdown failed.");
+            perror(NULL);
+            return -1;
+        }
+        peer_header = get_last_packet_ptr(socket, (size_t)bytes_received);
+        socket->peer_seq_number = peer_header->seq_number;   /* TODO: Do not ignore packet losses? */
+        socket->buf_fill_level -= bytes_received;
+        LOG_INFO("ACK packet received with seq_number %u and ack_number ...", socket->seq_number);    /* TODO: ACK number */
+
+        LOG_INFO("Connection successfully terminated");
+        LOG_INFO("Statistics:");
+        display_statistics(socket);
+
+        release_sock_resources(socket);
+        shutdown(socket->sd, SHUT_RDWR);
+        close(socket->sd);
+        socket->state = CLOSED;
+        return 0;
+    }
+    /* TODO... */
 }
 
 ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t length, int flags) {
@@ -426,7 +532,7 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
     /* TODO: header.checksum = ... */
 
     /* Send header + data */
-    LOG_INFO("Sending %zu bytes with seq_number %u", length, header.seq_number);
+    LOG_INFO("Sending total %zu bytes with seq_number %u, of whcih %u are user bytes", (length + sizeof(microtcp_header_t)), header.seq_number, length);
     bytes_sent = threshold_send(socket, &header, buffer, length, flags);
     if(bytes_sent == -1) {
         LOG_ERROR("Error while sending packet with seq_number %u",header.seq_number);
@@ -443,6 +549,7 @@ ssize_t microtcp_send (microtcp_sock_t *socket, const void *buffer, size_t lengt
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
     ssize_t bytes_received;
     microtcp_header_t *header_pointer;
+    int is_fin_header;
     void *data_pointer;
 
     LOG_INFO("Waiting for packet...");
@@ -452,17 +559,35 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
         perror(NULL);
         return -1;
     }
-    LOG_INFO("Packet received");
     header_pointer = (microtcp_header_t*)socket->recvbuf;
-    data_pointer = socket-> recvbuf  + sizeof(header_pointer);
+    data_pointer = socket->recvbuf  + sizeof(microtcp_header_t);
 
+    LOG_INFO("Packet received with seq_number %u", header_pointer->seq_number);
     if(header_pointer->seq_number != socket->peer_seq_number + bytes_received){
+        LOG_WARN("    Packet loss. Received packet with seq_number %u, while expecting %u", header_pointer->seq_number, (socket->peer_seq_number + (uint32_t)bytes_received));
         socket->statistics->packets_lost++;
-        socket->statistics->bytes_lost = header_pointer->seq_number - (socket->peer_seq_number + bytes_received);
+        socket->statistics->bytes_lost = header_pointer->seq_number - (socket->peer_seq_number + (uint32_t)bytes_received);
     }
     socket->peer_seq_number = header_pointer->seq_number;
     memcpy(buffer, data_pointer, bytes_received - sizeof(microtcp_header_t));
+    is_fin_header = is_fin(header_pointer);
+    socket->buf_fill_level -= bytes_received;
 
+    if(is_fin_header) {    /* Received FIN while waiting for data. Shutting down connection */
+        LOG_INFO("Pack received was FIN. Replying with ACK...");
+        if(send_header(socket, 1, 0, 0, 0, 0, 0) == -1) {
+            LOG_ERROR("Failed to send ACK header in response to FIN.");
+            perror(NULL);
+            return -1;
+        }
+        LOG_INFO("ACK packet sent with seq_number %u and ack_number ...", socket->seq_number);  /* TODO: ack number */
+        LOG_INFO("State set to: CLOSING_BY_PEER");
+        socket->state = CLOSING_BY_PEER;
+        return 0;
+    }
+
+    /* TODO: checksum? */
+    /* TODO: wait for re-transmission in case of different seq_number?*/
     return bytes_received;
 }
 
@@ -489,6 +614,10 @@ static microtcp_header_t microtcp_header() {
     return header;
 }
 
+static void display_statistics(microtcp_sock_t const *socket) {
+    /* TODO: implement...*/
+}
+
 static ssize_t threshold_recvfrom(int sd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen) {
     ssize_t bytes_received;
 
@@ -496,7 +625,7 @@ static ssize_t threshold_recvfrom(int sd, void *buf, size_t len, int flags, stru
         bytes_received = recvfrom(sd, buf, len, flags, src_addr, addrlen);
         if(bytes_received == -1)
             return -1;
-    } while(bytes_received < sizeof(microtcp_header_t));
+    } while((uint32_t)bytes_received < sizeof(microtcp_header_t));
     return bytes_received;
 }
 
@@ -557,7 +686,9 @@ static ssize_t recv_header(microtcp_sock_t *socket, uint8_t ack, uint8_t rst, ui
         if(bytes_received == sizeof(microtcp_header_t) && peer_header_p->control == dummy_header.control) {
             return bytes_received;
         } else {    /* Packet is not the requested one. Remove it from the buffer and revert changes in the socket */
-            socket->buf_fill_level -= bytes_received;   /* This variable was altered by thershold_recv() */
+            LOG_WARN("    Received different pack than expected. Packet Dropped. (Requested <control, packet_size>: <%u, %zu (header only)>"
+                     ", Received <control, packet_size>: <%u, %u>)", dummy_header.control, sizeof(microtcp_header_t), peer_header_p->control, (uint32_t)bytes_received);
+            socket->buf_fill_level -= bytes_received;   /* This variable was altered by threshold_recv() */
             socket->statistics->packets_received--;
             socket->statistics->bytes_received -= bytes_received;
         }
@@ -571,7 +702,7 @@ static ssize_t threshold_sendto(int sd, const void *buf, size_t len, int flags, 
         bytes_sent = sendto(sd, buf, len, flags, dest_addr, addrlen);
         if(bytes_sent == -1)
             return -1;
-    } while(bytes_sent < sizeof(microtcp_header_t));
+    } while((uint32_t)bytes_sent < sizeof(microtcp_header_t));
     return bytes_sent;
 }
 
@@ -609,6 +740,7 @@ static ssize_t send_header(microtcp_sock_t *socket, uint8_t ack, uint32_t ack_nu
     ssize_t bytes_sent;
     assert(socket);
 
+    /* Create the Header with the given parameters */
     set_ack(&host_header, ack);
     set_rst(&host_header, rst);
     set_syn(&host_header, syn);
@@ -617,17 +749,18 @@ static ssize_t send_header(microtcp_sock_t *socket, uint8_t ack, uint32_t ack_nu
         host_header.ack_number = ack_number;
     host_header.seq_number = (is_syn(&host_header)) ? (rand() % UINT32_MAX/2) : (socket->seq_number + sizeof(microtcp_header_t));   /* Divided by 2 in order to avoid rare overflows */
 
+    /* Convert to Network Byte Order and send */
     memcpy(&netwrok_header, &host_header, sizeof(microtcp_header_t));
     hton_header(&netwrok_header);
     bytes_sent = threshold_sendto(socket->sd, &netwrok_header, sizeof(microtcp_header_t), flags, (struct sockaddr*)socket->peer_sin, sizeof(*socket->peer_sin));
     if(bytes_sent == -1) {
         return -1;
     }
-
     assert(bytes_sent == sizeof(microtcp_header_t));
+
+    /* Update socket */
     if(is_ack(&host_header))
         socket->ack_number = host_header.ack_number;
-
     socket->seq_number = host_header.seq_number;
     socket->statistics->bytes_send += bytes_sent;
     socket->statistics->packets_send++;
