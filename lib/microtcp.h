@@ -24,6 +24,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <stdint.h>
+#include "cyclic_buffer.h"
 
 /*
  * Several useful constants
@@ -51,6 +52,22 @@ typedef enum {
     INVALID,    /* Set by accept(), connect() */
     UNKNOWN     /* Set by microtcp_socket */
 } mircotcp_state_t;
+
+/**
+ * microTCP header structure
+ * NOTE: DO NOT CHANGE!
+ */
+typedef struct {
+    uint32_t seq_number;          /**< Sequence number */
+    uint32_t ack_number;          /**< ACK number */
+    uint16_t control;             /**< Control bits (e.g. SYN, ACK, FIN) */
+    uint16_t window;              /**< Window size in bytes */
+    uint32_t data_len;            /**< Data length in bytes (EXCLUDING header) */
+    uint32_t future_use0;         /**< 32-bits for future use */
+    uint32_t future_use1;         /**< 32-bits for future use */
+    uint32_t future_use2;         /**< 32-bits for future use */
+    uint32_t checksum;            /**< CRC-32 checksum, see crc32() in utils folder */
+} microtcp_header_t;
 
 /**
  * Statistics for a microtcp connection
@@ -85,40 +102,24 @@ typedef struct {
     size_t init_win_size;         /**< The window size negotiated at the 3-way handshake */
     size_t curr_win_size;         /**< The current window size */
 
-    uint8_t *recvbuf;             /**< The *receive* buffer of the TCP
-                                     connection. It is allocated during the connection establishment and
-                                     is freed at the shutdown of the connection. This buffer is used
-                                     to retrieve the data from the network. */
-    size_t buf_length;            /* Maximum capacity of the buffer */
-    size_t buf_fill_level;        /**< Amount of data in the buffer */
+    /** Cyclic buffer used to store DATA received from the network.
+     *  It is allocated during the connection establishment and is freed at the shutdown of the connection */
+    cyclic_buffer_t* recvbuf;
+
+    /** Buffer used to store ONE packet to be sent to, or received from the network */
+    uint8_t packet_buffer[MICROTCP_MSS + sizeof(microtcp_header_t)];
 
     size_t cwnd;
     size_t ssthresh;
 
     uint32_t seq_number;            /**< Keep the state of the sequence number */
     uint32_t ack_number;            /**< Keep the state of the ack number */
-    uint32_t peer_seq_number;      /* Peer's last received sequence number. */
+    /*uint32_t peer_seq_number;      /* Peer's last received sequence number. */
 
     struct sockaddr_in *peer_sin;    /* Peer's address and port so that we can remember him when accept and connect are called */
     microtcp_sock_statistics_t *statistics;  /* Statistics of the microtcp socket */
 
 } microtcp_sock_t;
-
-/**
- * microTCP header structure
- * NOTE: DO NOT CHANGE!
- */
-typedef struct {
-    uint32_t seq_number;          /**< Sequence number */
-    uint32_t ack_number;          /**< ACK number */
-    uint16_t control;             /**< Control bits (e.g. SYN, ACK, FIN) */
-    uint16_t window;              /**< Window size in bytes */
-    uint32_t data_len;            /**< Data length in bytes (EXCLUDING header) */
-    uint32_t future_use0;         /**< 32-bits for future use */
-    uint32_t future_use1;         /**< 32-bits for future use */
-    uint32_t future_use2;         /**< 32-bits for future use */
-    uint32_t checksum;            /**< CRC-32 checksum, see crc32() in utils folder */
-} microtcp_header_t;
 
 
 microtcp_sock_t microtcp_socket (int domain, int type, int protocol);
