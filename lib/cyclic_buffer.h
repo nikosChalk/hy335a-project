@@ -54,6 +54,20 @@ size_t cyclic_buffer_cur_size(cyclic_buffer_t* cy_buf);
 size_t cyclic_buffer_free_size(cyclic_buffer_t* cy_buf);
 
 /**
+ * Checks if the cyclic buffer is empty
+ * @param cy_buf The cyclic buffer. Must not be NULL.
+ * @return 1 if the cyclic buffer is empty. Otherwise, 0.
+ */
+int cyclic_buffer_is_empty(cyclic_buffer_t *cy_buf);
+
+/**
+ * Checks if the cyclic buffer is full
+ * @param cy_buf The cyclic buffer. Must not be NULL.
+ * @return 1 if the cyclic buffer is full. Otherwise, 0.
+ */
+int cyclic_buffer_is_full(cyclic_buffer_t *cy_buf);
+
+/**
  * Delets the cyclic buffer and de-allocates resources. After this call, cy_buf is no longer usable.
  * @param cy_buf The cyclic buffer, must not be NULL.
  */

@@ -13,8 +13,6 @@
 #include "../utils/crc32.h"
 #include "../utils/log.h"
 
-#define MIN(X,Y) (((X) < (Y)) ? (X) : (Y))
-
 /****************************************************************/
 /********************* FORWARD DECLARATIONS *********************/
 /****************************************************************/
@@ -254,7 +252,6 @@ microtcp_sock_t microtcp_socket (int domain, int type, int protocol) {
     new_socket.ssthresh = 0;
     new_socket.seq_number = 0;
     new_socket.ack_number = 0;
-    new_socket.peer_seq_number = 0;
 
     new_socket.peer_sin = NULL;
     new_socket.statistics = NULL;
@@ -650,8 +647,12 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
             socket->statistics->packets_lost++;
             socket->statistics->bytes_lost = header_pointer->seq_number - socket->ack_number;
         }
+        /* TODO: 3 dups */
     } while(!is_in_order_packet);
     is_fin_header = is_fin(header_pointer);
+
+    /* Copy received data to recvbuf */
+    cyclic_buffer_append(socket->recvbuf, data_pointer, (bytes_received-sizeof(microtcp_header_t)));
 
     /* Send ACK */
     LOG_INFO("Replying with ACK packet with seq number %u and ack number %u", socket->seq_number, (socket->ack_number+(uint32_t)bytes_received));
@@ -662,9 +663,6 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
         return -1;
     }
 
-    /* Copy received data to recvbuf */
-    cyclic_buffer_append(socket->recvbuf, data_pointer, header_pointer->data_len);
-
     /* Check if the packet received is FIN */
     if(is_fin_header) {
         /* Shutting down connection */
@@ -673,6 +671,9 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
         socket->state = CLOSING_BY_PEER;
         return -1;
     }
+
+    /* Return data to user */
+    cyclic_buffer_pop(socket->recvbuf, buffer, (bytes_received-sizeof(microtcp_header_t))); /* TODO: It shouldn't be like this. */
 
     /* For statistics */
     if(isFirstCall) {
@@ -694,9 +695,10 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
 static void acquire_sock_resources(microtcp_sock_t *socket) {
     assert(socket);
     socket->recvbuf = cyclic_buffer_make(MICROTCP_RECVBUF_LEN);
+    socket->init_win_size = socket->curr_win_size = cyclic_buffer_free_size(socket->recvbuf);
 
-    socket->statistics = calloc(1, sizeof(*socket->statistics));    /* Memory initialized to 0 */
     socket->peer_sin = calloc(1, sizeof(*socket->peer_sin));       /* This is a struct sockaddr_in. It MUST be initialized to zero. */
+    socket->statistics = calloc(1, sizeof(*socket->statistics));    /* Memory initialized to 0 */
 
     socket->statistics->rx_max_inter = socket->statistics->tx_max_inter = -1;
     socket->statistics->rx_min_inter = socket->statistics->tx_min_inter = DBL_MAX;
@@ -872,8 +874,10 @@ static ssize_t send_header(microtcp_sock_t *socket, uint8_t ack, uint32_t ack_nu
     set_rst(header, rst);
     set_syn(header, syn);
     set_fin(header, fin);
-    if(is_ack(header))
+    if(is_ack(header)) {
         header->ack_number = ack_number;
+        header->window = (uint16_t)cyclic_buffer_free_size(socket->recvbuf);
+    }
     header->seq_number = (is_syn(header)) ? (rand() % UINT32_MAX/2) : (socket->seq_number);   /* Divided by 2 in order to avoid rare overflows */
 
     /* Convert to Network Byte Order and send */

@@ -99,8 +99,8 @@ typedef struct {
 typedef struct {
     int sd;                       /**< The underline UDP socket descriptor */
     mircotcp_state_t state;       /**< The state of the microTCP socket */
-    size_t init_win_size;         /**< The window size negotiated at the 3-way handshake */
-    size_t curr_win_size;         /**< The current window size */
+    uint16_t init_win_size;         /**< The window size negotiated at the 3-way handshake */
+/*    uint16_t curr_win_size;         /**< The current window size */
 
     /** Cyclic buffer used to store DATA received from the network.
      *  It is allocated during the connection establishment and is freed at the shutdown of the connection */
