@@ -100,7 +100,7 @@ typedef struct {
     int sd;                       /**< The underline UDP socket descriptor */
     mircotcp_state_t state;       /**< The state of the microTCP socket */
     uint16_t init_win_size;         /**< The window size negotiated at the 3-way handshake */
-/*    uint16_t curr_win_size;         /**< The current window size */
+    uint16_t peer_win_size;         /**< The current window size */
 
     /** Cyclic buffer used to store DATA received from the network.
      *  It is allocated during the connection establishment and is freed at the shutdown of the connection */
@@ -114,7 +114,6 @@ typedef struct {
 
     uint32_t seq_number;            /**< Keep the state of the sequence number */
     uint32_t ack_number;            /**< Keep the state of the ack number */
-    /*uint32_t peer_seq_number;      /* Peer's last received sequence number. */
 
     struct sockaddr_in *peer_sin;    /* Peer's address and port so that we can remember him when accept and connect are called */
     microtcp_sock_statistics_t *statistics;  /* Statistics of the microtcp socket */

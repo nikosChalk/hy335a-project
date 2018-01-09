@@ -13,7 +13,6 @@ struct cyclic_buffer {
     uint8_t *data_buffer;
     size_t head; /* Index of the rightmost used element */
     size_t tail; /* Index of the leftmost used element */
-
     size_t guard; /* Guard value used to indicate when the buffer is empty */
 
     /*
@@ -56,7 +55,7 @@ void cyclic_buffer_append(cyclic_buffer_t* cy_buf, void const *data, size_t data
 
     /* tail <= head < total_size */
     front_data_len = cy_buf->total_size - (cy_buf->head+1);
-    if(data_len > front_data_len) {
+    if(data_len > front_data_len && front_data_len > 0) {
         /* Two memcpy must be performed. One writes at the end of the buffer, and the other writes at the start of the buffer */
         memcpy(cy_buf->data_buffer+cy_buf->head+1, data, front_data_len);
         data = ((uint8_t const *)(data)) + front_data_len;
@@ -68,55 +67,61 @@ void cyclic_buffer_append(cyclic_buffer_t* cy_buf, void const *data, size_t data
     cy_buf->head += data_len-1; /* No wrap around will occur */
 }
 
-/**
- * Pops data_len bytes and copies them into buffer.
- * @param cy_buf The cyclic buffer, must not be NULL.
- * @param buffer The buffer where the retrieved data will be written.
- * @param data_len The amount of data to retrieve. Must be <= cyclic_buffer_cur_size()
- */
-void cyclic_buffer_pop(cyclic_buffer_t* cy_buf, void *buffer, size_t data_len);
+void cyclic_buffer_pop(cyclic_buffer_t* cy_buf, void *buffer, size_t data_len) {
+    size_t pop_from_end;
+    assert(cy_buf && data_len<=cyclic_buffer_cur_size(cy_buf));
 
-/**
- * Returns the total allocated size of the cyclic buffer.
- * @param cy_buf The cyclic buffer, must not be NULL.
- * @return The total allocated size of the cyclic buffer, in Bytes
- */
-size_t cyclic_buffer_total_size(cyclic_buffer_t* cy_buf);
+    if(data_len==0) /* Nothing to do here */
+        return;
 
-/**
- * Returns how much the buffer has been filled.
- * @param cy_buf The cyclic buffer, must not be NULL.
- * @return How many bytes out of total cyclic_buffer_total_size(), are currently being used.
- */
-size_t cyclic_buffer_cur_size(cyclic_buffer_t* cy_buf);
+    if(cy_buf->tail > cy_buf->head) {
+        pop_from_end = MIN2(cy_buf->total_size-cy_buf->tail, data_len);
+        memcpy(buffer, cy_buf->data_buffer+cy_buf->tail, pop_from_end);
+        cy_buf->tail = (cy_buf->tail+pop_from_end) % cy_buf->total_size;
+        data_len -= pop_from_end;
+        buffer = ((uint8_t*)(buffer)) + pop_from_end;
+    }
+    /* tail < head OR data_len == 0 (or both)*/
+    memcpy(buffer, cy_buf->data_buffer+cy_buf->tail, data_len);
+    cy_buf->tail = (cy_buf->tail+data_len) % cy_buf->total_size;   /* Possible wrap around if tail==0 and head == total_size-1 */
 
-/**
- * Returns how much of the buffer is still free.
- * @param cy_buf The cyclic buffer, must not be NULL.
- * @return How many bytes out of total cyclic_buffer_total_size(), are currently free.
- */
-size_t cyclic_buffer_free_size(cyclic_buffer_t* cy_buf);
+    if(cy_buf->tail == (cy_buf->head+1)%cy_buf->total_size) /* Tail surpassed head. Buffer is empty */
+        cy_buf->tail= cy_buf->head = cy_buf->guard;
+}
 
-/**
- * Checks if the cyclic buffer is empty
- * @param cy_buf The cyclic buffer. Must not be NULL.
- * @return 1 if the cyclic buffer is empty. Otherwise, 0.
- */
+size_t cyclic_buffer_total_size(cyclic_buffer_t* cy_buf) {
+    assert(cy_buf);
+    return cy_buf->total_size;
+}
+
+size_t cyclic_buffer_cur_size(cyclic_buffer_t* cy_buf) {
+    assert(cy_buf);
+
+    if(cy_buf->head == cy_buf->guard)
+        return 0;
+    else if(cy_buf->head >= cy_buf->tail)
+        return cy_buf->head - cy_buf->tail + 1;
+    else
+        return (cy_buf->total_size - cy_buf->tail) + (cy_buf->head+1);
+}
+
+size_t cyclic_buffer_free_size(cyclic_buffer_t* cy_buf) {
+    assert(cy_buf);
+    return cy_buf->total_size - cyclic_buffer_cur_size(cy_buf);
+}
+
 int cyclic_buffer_is_empty(cyclic_buffer_t *cy_buf) {
-
+    assert(cy_buf);
+    return (cy_buf->head == cy_buf->guard);
 }
 
-/**
- * Checks if the cyclic buffer is full
- * @param cy_buf The cyclic buffer. Must not be NULL.
- * @return 1 if the cyclic buffer is full. Otherwise, 0.
- */
 int cyclic_buffer_is_full(cyclic_buffer_t *cy_buf) {
-
+    assert(cy_buf);
+    return (cyclic_buffer_cur_size(cy_buf) == cy_buf->total_size);
 }
 
-/**
- * Delets the cyclic buffer and de-allocates resources. After this call, cy_buf is no longer usable.
- * @param cy_buf The cyclic buffer, must not be NULL.
- */
-void cyclic_buffer_delete(cyclic_buffer_t* cy_buf);
+void cyclic_buffer_delete(cyclic_buffer_t* cy_buf) {
+    assert(cy_buf);
+    free(cy_buf->data_buffer);
+    free(cy_buf);
+}
