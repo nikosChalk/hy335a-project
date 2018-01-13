@@ -133,8 +133,9 @@ static ssize_t threshold_recv(microtcp_sock_t *socket, int flags);
  * Once valid header has been received, it is stored within socket->packet_buffer.
  * The header will be stored in HOST Byte Order. Also when the valid packet is received, bytes_received and packets_received
  * of socket->statistics are updated.
- * In addition to that, if header is not SYN, socket->ack_number is increased. (+= bytes_received)
- * Also in case that the header is ACK, socket->peer_win_size is updated.
+ *
+ * In addition to that, socket->ack_number is set to header->seq_number + bytes_received.
+ * Also if the header is ACK, socket->peer_win_size is updated.
  *
  * In case that the packet's checksum is wrong, packets_lost of socket->statistics are updated and 3 DUPs are sent.
  * After that, it waits again for a packet.
@@ -209,11 +210,12 @@ static ssize_t send_header(microtcp_sock_t *socket, uint8_t ack, uint32_t ack_nu
  * After the send, the socket waits for a timeout interval for an ACK reply and retransmits the packet unless it has received the ACK
  * in that time period. Also receiving duplicate ACKs or corrupted packets (invalid checksum) causes retransmissions.
  *
- * In a successful send, socket->peer_win_size, socket->packet_buffer, socket->seq_number, socket->ack_number and
- * socket->statisticsare changed.
+ * In a successful send, socket->peer_win_size, socket->packet_buffer, socket->seq_number and socket->statisticsare changed.
+ * If wait_for_ack is set to 1, then also socket->ack_number is updated.
  * In case of error only socket->packet_buffer is affected.
  *
- * After this call, socket->packet_buffer contains the last received ACK.
+ * After this call, if wait_for_ack is 1, socket->packet_buffer contains the last received ACK in HOST Byte order.
+ * Otherwise it contains the packet sent in NETWORK Byte order.
  * @param socket The socket from which the data will be send. Must not be NULL.
  * @param buffer The buffer from which the data are to be sent
  * @param length How many bytes to send (payload). Must be <= MICROTCP_MSS
@@ -225,8 +227,8 @@ static ssize_t send_packet(microtcp_sock_t *socket, const void *buffer, size_t l
 
 /**
  * Sends dups duplicate ACKs to the address that is specified by socket->peer_sin.
- * In a successful send, the socket->seq_number is increased only ONE TIME by sizeof(microtcp_header_t) and not dups times.
- * Also all dups duplicate ACKs have the same sequence and ack number.
+ * In a successful send, the socket->seq_number is increased by dups times sizeof(microtcp_header_t).
+ * Also all dups duplicate ACKs have the same ack number.
  * Also bytes_sent, packets_sent of socket->statistics are updated.
  *
  * Note that this function uses packet->packet_buffer as the place where the header to be sent is stored. After the call, the
@@ -270,6 +272,16 @@ static void display_statistics(microtcp_sock_statistics_t *sock_statistics);
  * @return A microtcp_header_t header with each field initialized to 0.
  */
 static microtcp_header_t microtcp_header();
+
+/**
+ * Sets the socket's option to timeout after micro_sec_timeout has elapsed when a recv() or recvfrom() is called
+ * on that socket.
+ * @param socket The socket whose options will change. Must not be NULL and socket->sd must be valid.
+ * @param micro_sec_timeout The timeout interval in micro seconds. 0 disables the timeout option and the socket will receive
+ * (block) until a packet arrives.
+ * @return On success 0 is returned. Otherwise -1 is returned just as setsockopt().
+ */
+static int set_recv_timeout(microtcp_sock_t *socket, uint32_t micro_sec_timeout);
 
 /*******************************************************************/
 /******************* END OF FORWARD DECLARATIONS *******************/
@@ -544,24 +556,14 @@ int microtcp_shutdown (microtcp_sock_t *socket, int how) {
 }
 
 ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length, int flags) {
-    ssize_t bytes_sent;
+    microtcp_header_t *const header = (microtcp_header_t *)socket->packet_buffer;
     ssize_t total_payload_sent;
     size_t payload_left, payload_to_send, chunk_payload;
-    size_t chunk_count, i;
-    int duplicate_count;
-    int ack_count;
-    static struct timeval timeout, no_timeout;
+    size_t chunk_count, ack_count, i, bytes_sent;
     ssize_t bytes_received;
-    microtcp_header_t *header;
-    uint32_t previous_ack;
-    int time_out;
-
-    header = (microtcp_header_t *)socket->packet_buffer;
-
-    /* Set the timeout interval struct */
-    timeout.tv_sec = 0;
-    timeout.tv_usec = MICROTCP_ACK_TIMEOUT_US;
-    no_timeout.tv_sec = no_timeout.tv_usec = 0;
+    uint32_t previous_ack_number, init_seq_number, retransmit_seq_number;
+    int duplicate_count, pos;
+    void const *tmp_buffer_ptr;
 
     if(!socket) {
         LOG_ERROR("NULL socket passed");
@@ -576,71 +578,111 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
     while(payload_left>0) {
         payload_to_send = MIN3(payload_left, socket->cwnd, socket->peer_win_size);
 
-        /* Fill up the peer's buffer */
+        /* Determine how many chunks to send. */
         LOG_INFO("Sending %zu payload bytes in chunks:", payload_to_send);
         chunk_count = payload_to_send / MICROTCP_MSS;
         if(payload_to_send % MICROTCP_MSS != 0)
             chunk_count++;
+        init_seq_number = socket->seq_number;
+        tmp_buffer_ptr = buffer;
 
-        size_t expected_ack_nums[chunk_count];
-
+        /* Send the chunks and save the sent sequence numbers and the corresponding expected ack numbers */
+        uint32_t sent_seq_nums[chunk_count];    /* sequence numbers with which chunks will be sent */
+        uint32_t expected_ack_nums[chunk_count]; /* ack numbers with which the chunks will be acknowledged */
         for(i=0; i<chunk_count; i++) {
             chunk_payload = MIN2(payload_to_send, MICROTCP_MSS);
-            if(send_packet(socket, buffer, chunk_payload, flags, 0) == -1) {
+            sent_seq_nums[i] = socket->seq_number;
+
+            if(send_packet(socket, tmp_buffer_ptr, chunk_payload, flags, 0) == -1) {
                 LOG_ERROR("Failed to send packet.");
                 perror(NULL);
                 return (total_payload_sent>0) ? total_payload_sent : -1;
             }
             expected_ack_nums[i] = socket->seq_number;
-
-            buffer = ((uint8_t const *)(buffer)) + chunk_payload;
-            payload_left -= chunk_payload;
-            payload_to_send -= chunk_payload;
-            total_payload_sent += chunk_payload;
+            tmp_buffer_ptr = ((uint8_t const *)(tmp_buffer_ptr)) + chunk_payload;
         }
 
         /* Congestion avoidance */
-        duplicate_count = 0;
-        ack_count = 0;
-        time_out = 0;
-
-        if(setsockopt(socket->sd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {    /* Enable timeout */
+        if(set_recv_timeout(socket, MICROTCP_ACK_TIMEOUT_US) < 0) {    /* Enable timeout */
             LOG_ERROR("  Call to setsockopt() failed while enabling timeout. Aborting ACK receive");
             perror(NULL);
-            return -1;
+            return (total_payload_sent>0) ? total_payload_sent : -1;
         }
-        previous_ack = 0;
-        while(duplicate_count != 3 && chunk_count > ack_count) {
+
+
+        /* Start receiving ACKs */
+        uint8_t received_ack_flags[chunk_count];
+        memset(received_ack_flags, 0, chunk_count*sizeof(*received_ack_flags));
+        duplicate_count = 0;
+        for(ack_count=0; ack_count<chunk_count && duplicate_count < DUPS; ack_count++) {
             bytes_received = recv_header(socket, 1, 0, 0, 0, 0);
-            if(expected_ack_nums[ack_count] == header->ack_number){
-                previous_ack = expected_ack_nums[ack_count];
-                ack_count++;
-            } else if(header->ack_number == previous_ack){
+            if(bytes_received == -1) {  /* Timed out, or something went wrong */
+                if(errno == EAGAIN || errno == EWOULDBLOCK) {   /* Timed out */
+                    socket->ssthresh = socket->cwnd/2;
+                    socket->cwnd = MIN2(MICROTCP_MSS, socket->ssthresh);
+/*                    socket->cwnd += MICROTCP_MSS; */
+                    break;
+                }
+                return -1;  /* TODO: is this okay? */
+            }
+
+            pos=0;
+            while(pos<chunk_count && header->ack_number != expected_ack_nums[pos])
+                pos++;
+            if(pos == chunk_count) {    /* Received ACK was duplicate and peer did not receive even the first packet */
+                previous_ack_number = init_seq_number;
+                duplicate_count++;
+            } else if(ack_count ==0) {  /* first received ack. Cannot be duplicate */
+                previous_ack_number = header->ack_number;
+                received_ack_flags[pos] = 1;
+            } else if(header->ack_number != previous_ack_number) {  /* non-duplicate, normal ACK */
+                received_ack_flags[pos] = 1;
+                duplicate_count = 0;
+                socket->cwnd += MICROTCP_MSS;
+            } else if (header->ack_number == previous_ack_number ) { /* received duplicate ACK */
                 duplicate_count++;
             }
-            if (bytes_received == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) { /* Timed out, or something went wrong */
-                socket->ssthresh = socket->cwnd/2;
-                socket->cwnd = MIN2(MICROTCP_MSS, socket->ssthresh);
-                socket->cwnd += MICROTCP_MSS;
-                time_out = 1;
-                break;
-            }
         }
-        /* Restore socket to non-time out mode */
-        if(setsockopt(socket->sd, SOL_SOCKET, SO_RCVTIMEO, &no_timeout, sizeof(timeout)) < 0) {    /* Disable timeout */
-            LOG_ERROR("  Call to setsockopt() failed while disabling timeout.");
-            perror(NULL);
-            return -1;
+
+        /* Find the last ack_number that we received */
+        for(i=0, pos=-1; i<chunk_count; i++)
+            if(received_ack_flags[i] == 1)
+                pos = (int)i;
+
+        /* Find the retransmission sequence number */
+        if(pos == -1) { /* Peer did not receive even the first chunk */
+            retransmit_seq_number = init_seq_number;
+        } else if (expected_ack_nums[pos] != socket->seq_number) {  /* peer received some chunks */
+            assert(pos < chunk_count);
+            retransmit_seq_number = sent_seq_nums[pos+1];
+        } else {    /* Peer received all chunks */
+            /* No retransmission */
+            retransmit_seq_number = socket->seq_number;
         }
+        bytes_sent = retransmit_seq_number-init_seq_number-chunk_count*sizeof(microtcp_header_t); /* TODO: caution */
+        payload_left -= bytes_sent;
+        total_payload_sent += bytes_sent;
+        buffer = ((uint8_t const *)(buffer)) + bytes_sent;
+        socket->seq_number = retransmit_seq_number;
+
         if(duplicate_count == 3){
             socket->ssthresh = socket->cwnd/2 + 1;
             socket->cwnd = socket->cwnd/2 + 1;
         }
-        if(time_out == 1){
+
+        /* Restore socket to non-time out mode */
+        if(set_recv_timeout(socket, 0) < 0) {    /* Disable timeout */
+            LOG_ERROR("  Call to setsockopt() failed while disabling timeout.");
+            perror(NULL);
+            return (total_payload_sent>0) ? total_payload_sent : -1;
+        }
+
+        /* Peer did not receive all chunks and has not been filled. Do not probe him */
+        if(retransmit_seq_number != socket->seq_number){
             continue;
         }
 
-        /* Peer's buffer filled up. Probe him until we get a positive window. */
+        /* Peer's buffer might be filled up. Probe him until we get a positive window. */
         while(socket->peer_win_size == 0 && payload_left>0) {
             LOG_INFO("  Probing until we receive positive window...");
             if(usleep((uint32_t)rand() % (MICROTCP_ACK_TIMEOUT_US+1)) == -1){
@@ -660,72 +702,115 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
 }
 
 ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int flags) {
-    microtcp_header_t *header;
+    microtcp_header_t * const header = (microtcp_header_t *) socket->packet_buffer;
+    void * const data_pointer = socket->packet_buffer + sizeof(microtcp_header_t);
+
     ssize_t bytes_received, bytes_sent;
     int is_fin_header, is_ack_header, is_out_of_order;
-    void *data_pointer;
 
     if(!socket) {
         LOG_ERROR("NULL socket passed");
         return -1;
+    } else if(socket->state == CLOSING_BY_PEER) {
+        LOG_INFO("microtcp_recv called when socket's state is CLOSING_BY_PEER");
+
+        if(!cyclic_buffer_is_empty(socket->recvbuf) && length>0) {
+            LOG_INFO("  Internal buffer still has data to satisfy user's demands. Returning those...");
+                return cyclic_buffer_pop(socket->recvbuf, buffer, MIN2(length, cyclic_buffer_cur_size(socket->recvbuf)));
+        } else {
+            LOG_INFO("  Internal buffer is empty. Returning -1");
+            return -1;
+        }
     } else if(socket->state != ESTABLISHED) {
         LOG_ERROR("Socket has invalid state");
         return -1;
     }
 
-    header = (microtcp_header_t *) socket->packet_buffer;
-    data_pointer = socket->packet_buffer + sizeof(microtcp_header_t);
-    /* Wait for packet and drop out of order ones or dangling ACKs. */
-    do {
-        LOG_INFO("Waiting for packet...");
-        bytes_received = threshold_recv(socket, flags);
-        if (bytes_received == -1) {
-            LOG_ERROR("Waiting for packet failed:");
+    /* While buffer can hold more data and we have not satisfied the user, keep receiving. */
+    while((!cyclic_buffer_is_full(socket->recvbuf)) && (cyclic_buffer_cur_size(socket->recvbuf) < length)) {
+
+        /* In case that we have some data available, wait up to 0.6 secs for more data. */
+        if(!cyclic_buffer_is_empty(socket->recvbuf)) {
+            if(set_recv_timeout(socket, 600000) < 0) {    /* Enable timeout */
+                LOG_ERROR("  Call to setsockopt() failed while enabling timeout.");
+                perror(NULL);
+            }
+        }
+
+        /* Wait for packet and drop out of order ones or dangling ACKs. */
+        do {
+            LOG_INFO("Waiting for packet...");
+            bytes_received = threshold_recv(socket, flags);
+            if (bytes_received == -1) {
+
+                if ((errno == EAGAIN || errno == EWOULDBLOCK)) {    /* Timed out. Returning already gathered data to user */
+                    LOG_INFO("   Timed out while waiting for packet and we already have data in internal buffer. Returning those...");
+                    if(set_recv_timeout(socket, 0) < 0) {    /* Disable timeout */
+                        LOG_ERROR("  Call to setsockopt() failed while disabling timeout.");
+                        perror(NULL);
+                        return -1;
+                    }
+                    return cyclic_buffer_pop(socket->recvbuf, buffer, MIN2(length, cyclic_buffer_cur_size(socket->recvbuf)) );
+
+                } else {    /* Error while receiving data */
+                    LOG_ERROR("Waiting for packet failed:");
+                    perror(NULL);
+                    return -1;
+                }
+            }
+
+            LOG_INFO("Packet received with seq_number %u", header->seq_number);
+            is_ack_header = is_ack(header);
+            is_fin_header = is_fin(header);
+            is_out_of_order = (header->seq_number != socket->ack_number);
+            if (is_ack_header && !is_fin_header) {
+                LOG_INFO("    Packet received was a dangling ACK or sender failed the CRC checksum when receiving 3 DUPs. Packet ignored.");
+            } else if (!is_ack_header && is_out_of_order) {    /* Check if received packet is out of order. */
+                LOG_WARN("    Packet dropped. Received packet with seq_number %u, while expecting %u. Sending %u DUPs...", header->seq_number, socket->ack_number, DUPS);
+                if (send_dups(socket, DUPS) == -1)
+                    LOG_WARN("    Could not send DUPs.");
+                else
+                    LOG_INFO("    All DUPs successfully sent with ack_number %u. Current seq_number %u", socket->ack_number, socket->seq_number);
+            }
+        } while (is_out_of_order || (is_ack_header && !is_fin_header));
+
+        if(set_recv_timeout(socket, 0) < 0) {    /* Disable timeout */
+            LOG_ERROR("  Call to setsockopt() failed while disabling timeout.");
             perror(NULL);
             return -1;
         }
 
-        LOG_INFO("Packet received with seq_number %u", header->seq_number);
-        is_ack_header = is_ack(header);
-        is_fin_header = is_fin(header);
-        is_out_of_order = (header->seq_number != socket->ack_number);
-        if(is_ack_header && !is_fin_header)
-            LOG_INFO("    Packet received was a dangling ACK. Packet ignored.");
-        else if(!is_ack_header && is_out_of_order) {    /* Check if received packet is out of order. (Dangling ACKs are also considered out of order, but we want them in seperate cases) */
-            LOG_WARN("    Packet dropped. Received packet with seq_number %u, while expecting %u. Sending %u DUPs...", header->seq_number, socket->ack_number, DUPS);
-            if(send_dups(socket, DUPS) == -1)
-                LOG_WARN("    Could not send DUPs.");
-            else
-                LOG_INFO("    All DUPs successfully sent with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
+        /* Copy received data to recvbuf */
+        cyclic_buffer_append(socket->recvbuf, data_pointer, (bytes_received-sizeof(microtcp_header_t)));
+        cyclic_buffer_resize(socket->recvbuf);
+
+        /* Send ACK */
+        bytes_sent = send_header(socket, 1, (socket->ack_number+(uint32_t)bytes_received), 0, 0, 0, 0);
+        if(bytes_sent == -1) {
+            LOG_ERROR("Failed to send ACK header in response to FIN.");
+            perror(NULL);
+            return -1;
         }
+        LOG_INFO("ACK packet sent with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
 
-    } while(is_out_of_order || (is_ack_header && !is_fin_header));
-
-    /* Copy received data to recvbuf */
-    cyclic_buffer_append(socket->recvbuf, data_pointer, (bytes_received-sizeof(microtcp_header_t)));
-
-    /* Send ACK */
-    bytes_sent = send_header(socket, 1, (socket->ack_number+(uint32_t)bytes_received), 0, 0, 0, 0);
-    if(bytes_sent == -1) {
-        LOG_ERROR("Failed to send ACK header in response to FIN.");
-        perror(NULL);
-        return -1;
-    }
-    LOG_INFO("ACK packet sent with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
-
-    /* Check if the packet received is FIN */
-    if(is_fin_header) {
-        /* Shutting down connection */
-        LOG_INFO("    Packet received with seq_num %u was FIN.", (socket->ack_number-(uint32_t)bytes_sent));
-        LOG_INFO("    State set to: CLOSING_BY_PEER");
-        socket->state = CLOSING_BY_PEER;
-        return -1;
+        /* Check if the packet received is FIN */
+        if(is_fin_header) {
+            /* Shutting down connection */
+            LOG_INFO("    Packet received with seq_num %u was FIN.", (socket->ack_number-(uint32_t)bytes_sent));
+            LOG_INFO("    State set to: CLOSING_BY_PEER");
+            socket->state = CLOSING_BY_PEER;
+            if(!cyclic_buffer_is_empty(socket->recvbuf) && length>0) {
+                LOG_INFO("    Internal buffer still has data to satisfy user's demands. Returning those...");
+                return cyclic_buffer_pop(socket->recvbuf, buffer, MIN2(length, cyclic_buffer_cur_size(socket->recvbuf)));
+            } else {
+                LOG_INFO("    Internal buffer is empty. Returning -1");
+                return -1;
+            }
+        }
     }
 
     /* Return data to user */
-    cyclic_buffer_pop(socket->recvbuf, buffer, (bytes_received-sizeof(microtcp_header_t))); /* TODO: It shouldn't be like this. */
-
-    return bytes_received-sizeof(microtcp_header_t); /* It is always guaranteed that at least sizeof(microtcp_header_t) bytes will be received */
+    return cyclic_buffer_pop(socket->recvbuf, buffer, MIN2(length, cyclic_buffer_cur_size(socket->recvbuf)) );
 }
 
 static void acquire_sock_resources(microtcp_sock_t *socket) {
@@ -753,6 +838,25 @@ static microtcp_header_t microtcp_header() {
     return header;
 }
 
+/**
+ * Sets the socket's option to timeout after micro_sec_timeout has elapsed when a recv() or recvfrom() is called
+ * on that socket.
+ * @param socket The socket whose options will change. Must not be NULL and socket->sd must be valid.
+ * @param micro_sec_timeout The timeout interval in micro seconds. 0 disables the timeout option and the socket will receive
+ * (block) until a packet arrives.
+ * @return On success 0 is returned. Otherwise -1 is returned just as setsockopt().
+ */
+static int set_recv_timeout(microtcp_sock_t *socket, uint32_t micro_sec_timeout) {
+    struct timeval timeout;
+    assert(socket);
+
+    /* Set the timeout interval struct */
+    timeout.tv_sec = 0;
+    timeout.tv_usec = micro_sec_timeout;
+
+    return setsockopt(socket->sd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+}
+
 static void display_statistics(microtcp_sock_statistics_t *sock_statistics) {
     if(sock_statistics->tx_max_inter == -1) /* Field has its initial value. No more than 1 data packet was sent. */
         sock_statistics->tx_min_inter = sock_statistics->tx_max_inter = 0;
@@ -760,8 +864,14 @@ static void display_statistics(microtcp_sock_statistics_t *sock_statistics) {
     if(sock_statistics->rx_max_inter == -1) /* Field has its initial value. No more than 1 data packet was received. */
         sock_statistics->rx_min_inter = sock_statistics->rx_max_inter = 0;
 
-    sock_statistics->rx_mean_inter /= (sock_statistics->packets_received -1);
-    sock_statistics->tx_mean_inter /= (sock_statistics->packets_send -1);
+    sock_statistics->rx_mean_inter /= sock_statistics->packets_received;
+    sock_statistics->rx_std_inter /= sock_statistics->packets_received;
+    sock_statistics->rx_std_inter = sock_statistics->rx_std_inter - (sock_statistics->rx_mean_inter * sock_statistics->rx_mean_inter);
+
+    sock_statistics->tx_mean_inter /= sock_statistics->packets_send;
+    sock_statistics->tx_std_inter /= sock_statistics->packets_send;
+    sock_statistics->tx_std_inter = sock_statistics->tx_std_inter - (sock_statistics->tx_mean_inter * sock_statistics->tx_mean_inter);
+
 
     printf("Packets received \t: %" PRIu64 "\n", sock_statistics->packets_received);
     printf("Packets sent \t\t: %" PRIu64 "\n", sock_statistics->packets_send);
@@ -771,12 +881,12 @@ static void display_statistics(microtcp_sock_statistics_t *sock_statistics) {
     printf("Min \t\t\t: %.6lf\n", sock_statistics->rx_min_inter);
     printf("Max \t\t\t: %.6lf\n", sock_statistics->rx_max_inter);
     printf("Mean \t\t\t: %.6lf\n", sock_statistics->rx_mean_inter);
-    printf("Std^2 (Variance)\t: ...\n");
+    printf("Std^2 (Variance)\t: %.6lf\n", sock_statistics->rx_std_inter);
     printf("Packet inter-arrival TX\n");
     printf("Min \t\t\t: %.6lf\n", sock_statistics->tx_min_inter);
     printf("Max \t\t\t: %.6lf\n", sock_statistics->tx_max_inter);
     printf("Mean \t\t\t: %.6lf\n", sock_statistics->tx_mean_inter);
-    printf("Std^2 (Variance)\t: ...\n");
+    printf("Std^2 (Variance)\t: %.6lf\n", sock_statistics->tx_std_inter);
 }
 
 static ssize_t threshold_recvfrom(int sd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen) {
@@ -832,6 +942,7 @@ static ssize_t threshold_recv(microtcp_sock_t *socket, int flags) {
             socket->statistics->rx_min_inter = (time_diff < socket->statistics->rx_min_inter) ? (time_diff) : socket->statistics->rx_min_inter;
             socket->statistics->rx_max_inter = (time_diff > socket->statistics->rx_max_inter) ? (time_diff) : socket->statistics->rx_max_inter;
             socket->statistics->rx_mean_inter += time_diff;
+            socket->statistics->rx_std_inter += time_diff*time_diff;
 
             memcpy(&last_call_time, &cur_call_time, sizeof(cur_call_time));
         }
@@ -873,10 +984,8 @@ static ssize_t recv_header(microtcp_sock_t *socket, uint8_t ack, uint8_t rst, ui
             return -1;
 
         if(bytes_received == sizeof(microtcp_header_t) && received_header->control == dummy_header.control) {
-            if(is_syn(received_header))
-                socket->ack_number = received_header->seq_number + (uint32_t)bytes_received;
-            else
-                socket->ack_number += bytes_received;
+            socket->ack_number = received_header->seq_number + (uint32_t)bytes_received;
+
             if(is_ack(received_header))
                 socket->peer_win_size = received_header->window;
             return bytes_received;
@@ -933,6 +1042,7 @@ static ssize_t threshold_send(microtcp_sock_t *socket, int flags) {
         socket->statistics->tx_min_inter = (time_diff < socket->statistics->tx_min_inter) ? (time_diff) : socket->statistics->tx_min_inter;
         socket->statistics->tx_max_inter = (time_diff > socket->statistics->tx_max_inter) ? (time_diff) : socket->statistics->tx_max_inter;
         socket->statistics->tx_mean_inter += time_diff;
+        socket->statistics->tx_std_inter += time_diff*time_diff;
 
         memcpy(&last_call_time, &cur_call_time, sizeof(cur_call_time));
     }
@@ -974,27 +1084,30 @@ static ssize_t send_header(microtcp_sock_t *socket, uint8_t ack, uint32_t ack_nu
 }
 
 static ssize_t send_packet(microtcp_sock_t *socket, const void *buffer, size_t length, int flags, int wait_for_ack) {
-    static struct timeval timeout, no_timeout;    /* For ACK timeout */
-    static int isFirstCall = 1;
-
-    microtcp_header_t *header = (microtcp_header_t*)socket->packet_buffer;;
-    ssize_t bytes_sent;
-    ssize_t bytes_received;
+    microtcp_header_t *header = (microtcp_header_t*)socket->packet_buffer;
+    ssize_t bytes_sent, bytes_received;
+    size_t dup_count;
+    uint32_t init_seq_number;
     int retransmit = 0;  /* Boolean in order to check if retransmission is needed */
+    int packet_acknowledged;
     assert(socket && length<=MICROTCP_MSS && (wait_for_ack == 0 || wait_for_ack == 1));
-
-    if(isFirstCall) {
-        /* Set the timeout interval struct */
-        timeout.tv_sec = 0;
-        timeout.tv_usec = MICROTCP_ACK_TIMEOUT_US;
-        no_timeout.tv_sec = no_timeout.tv_usec = 0;
-    }
 
     /* Copy data */
     memcpy(socket->packet_buffer + sizeof(microtcp_header_t), buffer, length);
 
+    /* Set ack timeout option in case we are expecting one. */
+    if(wait_for_ack) {
+        if(set_recv_timeout(socket, MICROTCP_ACK_TIMEOUT_US) < 0) {    /* Enable timeout */
+            LOG_ERROR("  Call to setsockopt() failed while enabling timeout. Aborting ACK receive");
+            perror(NULL);
+            return -1;
+        }
+    }
+
     /* Start sending */
+    init_seq_number = socket->seq_number;
     do {
+        retransmit = 0;
         /* Create header */
         *header = microtcp_header();
         header->seq_number = socket->seq_number;
@@ -1010,68 +1123,65 @@ static ssize_t send_packet(microtcp_sock_t *socket, const void *buffer, size_t l
         }
 
         if(wait_for_ack == 1) { /* check if should wait for ACK */
-            /* Set ack timeout option */
-            if(setsockopt(socket->sd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {    /* Enable timeout */
-                LOG_ERROR("  Call to setsockopt() failed while enabling timeout. Aborting ACK receive");
-                perror(NULL);
-                return -1;
-            }
-
-            /* Receive ACK */
-            LOG_INFO("  Waiting for ACK...");
-            bytes_received = recv_header(socket, 1, 0, 0, 0, 0);
-            if (bytes_received == -1) { /* Timed out, or something went wrong */
-                retransmit = (errno == EAGAIN || errno == EWOULDBLOCK); /* Time out */
-                if (!retransmit) {
-                    LOG_ERROR("  Error while receiving ACK");
-                    perror(NULL);
-                    return -1;
-                } else {
-                    LOG_INFO("  Waiting for ACK timed out. Retransmitting...");
-                }
-            } else { /* ACK received. Check it */
-                retransmit = (header->ack_number != socket->seq_number);
-                if (retransmit)
+            dup_count = 0;
+            packet_acknowledged = 0;
+            do {
+                /* Receive ACK and drop other packets */
+                LOG_INFO("  Waiting for ACK...");
+                bytes_received = recv_header(socket, 1, 0, 0, 0, 0);    /* Receiving anything else than header can destroy the data copied */
+                if(bytes_received == -1) { /* Timed out, or something went wrong */
+                    retransmit = (errno == EAGAIN || errno == EWOULDBLOCK); /* Time out */
+                    if (!retransmit) {
+                        LOG_ERROR("  Error while receiving ACK");
+                        perror(NULL);
+                        return -1;
+                    } else {
+                        LOG_INFO("  Waiting for ACK timed out. Retransmitting...");
+                    }
+                } else { /* ACK received. Check it */
+                    if(header->ack_number == init_seq_number)
+                        dup_count++;
+                    else if(header->ack_number == socket->seq_number)
+                        packet_acknowledged = 1;
                     LOG_INFO("  Received ACK with ack_number %u while expecting %u. Retransmitting...", header->ack_number, socket->seq_number);
-            }
-            if (retransmit) {
-                socket->seq_number -= bytes_sent;   /* We will re-send the same packet. The re-transmitted packet must have the same seq_number. */
+                }
+            } while((dup_count>0 && dup_count <3) && (!packet_acknowledged) && (!retransmit));
+            if(dup_count == 3)
+                retransmit = 1;
+
+            if(retransmit) {
+                socket->seq_number = init_seq_number;   /* We will re-send the same packet. The re-transmitted packet must have the same seq_number. */
                 socket->statistics->packets_lost++;
                 socket->statistics->bytes_lost += bytes_sent;
             } else {
-                socket->ack_number = header->seq_number + (uint32_t) bytes_received;    /* We explicitly change this, since we might have missed a few ACKs in previous loops */
+                socket->ack_number = header->seq_number + (uint32_t) bytes_received;    /* We explicitly change this, since we might have missed a few ACKs */
+                LOG_INFO("  ACK received with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
             }
         }
      } while(retransmit && wait_for_ack);
-    LOG_INFO("  ACK received with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
 
     /* Restore socket to non-time out mode */
-    if(setsockopt(socket->sd, SOL_SOCKET, SO_RCVTIMEO, &no_timeout, sizeof(timeout)) < 0) {    /* Disable timeout */
-        LOG_ERROR("  Call to setsockopt() failed while disabling timeout.");
-        perror(NULL);
-        return -1;
+    if(wait_for_ack) {
+        if(set_recv_timeout(socket, 0) < 0) {    /* Disable timeout */
+            LOG_ERROR("  Call to setsockopt() failed while disabling timeout.");
+            perror(NULL);
+            return -1;
+        }
     }
 
     return bytes_sent-sizeof(microtcp_header_t);    /* It is always guaranteed that at least sizeof(microtcp_header_t) will be sent */
 }
 
 static ssize_t send_dups(microtcp_sock_t *socket, size_t dups) {
-    microtcp_header_t *header;
     ssize_t cur_bytes_sent, total_bytes_sent;
-    uint32_t old_seq_number;
     size_t i;
     assert(socket && dups>0);
 
-    old_seq_number = socket->seq_number;
     for(i=0, total_bytes_sent=0; i<dups; i++) {
-        if((cur_bytes_sent = send_header(socket, 1, socket->ack_number, 0, 0, 0, 0)) == -1) {
-            socket->seq_number = old_seq_number;
+        if((cur_bytes_sent = send_header(socket, 1, socket->ack_number, 0, 0, 0, 0)) == -1)
             return -1;
-        }
         total_bytes_sent += cur_bytes_sent;
-        socket->seq_number = old_seq_number;
     }
-    socket->seq_number = old_seq_number + (uint32_t)cur_bytes_sent;
 
     return total_bytes_sent;
 }

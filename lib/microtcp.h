@@ -84,10 +84,12 @@ typedef struct {
     double rx_min_inter;
     double rx_max_inter;
     double rx_mean_inter;
+    double rx_std_inter;
 
     double tx_min_inter;
     double tx_max_inter;
     double tx_mean_inter;
+    double tx_std_inter;
 } microtcp_sock_statistics_t;
 
 /**

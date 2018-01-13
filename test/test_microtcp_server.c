@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
     microtcp_accept(&socket, NULL, 0);
 
     printf("Start receiving...\n");
-    while((bytes_received = microtcp_recv(&socket, data_buffer, 1000, 0)) > 0) {
+    while((bytes_received = microtcp_recv(&socket, data_buffer, 14, 0)) > 0) {
         printf("Message Received: %s\n", data_buffer);
     }
     microtcp_shutdown(&socket, SHUT_RDWR);

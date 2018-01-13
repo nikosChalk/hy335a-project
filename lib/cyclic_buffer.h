@@ -7,6 +7,9 @@
 
 #include <stddef.h>
 
+#define MAX_BUFFER_SIZE  (1024*60)    /* == 60 MB */
+#define MIN_BUFFER_SIZE 2             /* 2 Bytes */
+
 typedef struct cyclic_buffer cyclic_buffer_t;
 
 /**
@@ -29,8 +32,9 @@ void cyclic_buffer_append(cyclic_buffer_t* cy_buf, void const *data, size_t data
  * @param cy_buf The cyclic buffer, must not be NULL.
  * @param buffer The buffer where the retrieved data will be written.
  * @param data_len The amount of data to retrieve. Must be <= cyclic_buffer_cur_size()
+ * @return The data_len
  */
-void cyclic_buffer_pop(cyclic_buffer_t* cy_buf, void *buffer, size_t data_len);
+size_t cyclic_buffer_pop(cyclic_buffer_t* cy_buf, void *buffer, size_t data_len);
 
 /**
  * Returns the total allocated size of the cyclic buffer.
@@ -52,6 +56,16 @@ size_t cyclic_buffer_cur_size(cyclic_buffer_t* cy_buf);
  * @return How many bytes out of total cyclic_buffer_total_size(), are currently free.
  */
 size_t cyclic_buffer_free_size(cyclic_buffer_t* cy_buf);
+
+/**
+ * Resizes this cyclic buffer. If at least 75% of the buffer is full, then the buffer's size is doubled, with total
+ * size up to MAX_BUFFER_SIZE.
+ * If less than or equal to the 25% of the buffer is full, then the buffer is shrunk in half size. The total size cannot be less
+ * than MIN_BUFFER_SIZE.
+ * @param cy_buf The cyclic buffer to resize. Must not be NULL.
+ * @return The buffer's new size in Bytes.
+ */
+size_t cyclic_buffer_resize(cyclic_buffer_t* cy_buf);
 
 /**
  * Checks if the cyclic buffer is empty

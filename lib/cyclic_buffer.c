@@ -67,12 +67,12 @@ void cyclic_buffer_append(cyclic_buffer_t* cy_buf, void const *data, size_t data
     cy_buf->head += data_len-1; /* No wrap around will occur */
 }
 
-void cyclic_buffer_pop(cyclic_buffer_t* cy_buf, void *buffer, size_t data_len) {
+size_t cyclic_buffer_pop(cyclic_buffer_t* cy_buf, void *buffer, size_t data_len) {
     size_t pop_from_end;
     assert(cy_buf && data_len<=cyclic_buffer_cur_size(cy_buf));
 
     if(data_len==0) /* Nothing to do here */
-        return;
+        return 0;
 
     if(cy_buf->tail > cy_buf->head) {
         pop_from_end = MIN2(cy_buf->total_size-cy_buf->tail, data_len);
@@ -87,6 +87,7 @@ void cyclic_buffer_pop(cyclic_buffer_t* cy_buf, void *buffer, size_t data_len) {
 
     if(cy_buf->tail == (cy_buf->head+1)%cy_buf->total_size) /* Tail surpassed head. Buffer is empty */
         cy_buf->tail= cy_buf->head = cy_buf->guard;
+    return data_len;
 }
 
 size_t cyclic_buffer_total_size(cyclic_buffer_t* cy_buf) {
@@ -108,6 +109,53 @@ size_t cyclic_buffer_cur_size(cyclic_buffer_t* cy_buf) {
 size_t cyclic_buffer_free_size(cyclic_buffer_t* cy_buf) {
     assert(cy_buf);
     return cy_buf->total_size - cyclic_buffer_cur_size(cy_buf);
+}
+
+size_t cyclic_buffer_resize(cyclic_buffer_t* cy_buf) {
+    size_t old_size, tmp_size;
+    void *old_pointer;
+    assert(cy_buf);
+
+    old_size = cy_buf->total_size;
+    old_pointer = cy_buf->data_buffer;
+    if(cyclic_buffer_cur_size(cy_buf) >= (cy_buf->total_size)*0.75) {  /* Expand */
+        if(cy_buf->total_size == MAX_BUFFER_SIZE)   /* No expansion available */
+            return MAX_BUFFER_SIZE;
+
+        /* Expand buffer */
+        cy_buf->total_size = MIN2(MAX_BUFFER_SIZE, (cy_buf->total_size)*2);
+        cy_buf->data_buffer = realloc(cy_buf->data_buffer, cy_buf->total_size);
+        if(cy_buf->tail > cy_buf->head) {   /* Tail pointer and data must be moved */
+            tmp_size = old_size - cy_buf->tail; /* Data which are right of tail */
+            memmove((cy_buf->data_buffer + cy_buf->total_size - tmp_size), (cy_buf->data_buffer + cy_buf->tail), tmp_size);
+            cy_buf->tail = cy_buf->total_size - tmp_size;
+        }
+
+    } else if (cyclic_buffer_cur_size(cy_buf) <= (cy_buf->total_size)*0.25){    /* Shrink */
+        if(cy_buf->total_size == MIN_BUFFER_SIZE)   /* No shrinking available */
+            return MIN_BUFFER_SIZE;
+
+        cy_buf->total_size = MAX(MIN_BUFFER_SIZE, (cy_buf->total_size)/2);
+        if(cy_buf->head != cy_buf->guard) { /* cyclic buffer is not empty */
+
+            if((cy_buf->tail <= cy_buf->head) && (cy_buf->head >= cy_buf->total_size)) {    /* Tail is before head and data must be moved before re-alloc */
+                tmp_size = cy_buf->head - cy_buf->tail + 1;   /* Current data size in buffer */
+                memmove(cy_buf->data_buffer, (cy_buf->data_buffer + cy_buf->tail), tmp_size); /* We do not care for overlapping memory */
+                cy_buf->tail = 0;
+                cy_buf->head = tmp_size - 1;
+            } else if(cy_buf->tail > cy_buf->head) {    /* tail is after head, hence data must be moved before re-alloc */
+                tmp_size = old_size - cy_buf->tail; /* Data which are right of tail */
+                memmove((cy_buf->data_buffer + cy_buf->total_size - tmp_size), (cy_buf->data_buffer + cy_buf->tail), tmp_size);
+                cy_buf->tail = cy_buf->total_size - tmp_size;
+            }
+        }
+        cy_buf->data_buffer = realloc(cy_buf->data_buffer, cy_buf->total_size);
+    }
+
+    if(cy_buf->data_buffer != old_pointer)  /* re-alloc occured. */
+        free(old_pointer);  /*the data block was moved. Free the old pointer */
+
+    return cy_buf->total_size;
 }
 
 int cyclic_buffer_is_empty(cyclic_buffer_t *cy_buf) {
