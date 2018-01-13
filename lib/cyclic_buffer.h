@@ -62,10 +62,13 @@ size_t cyclic_buffer_free_size(cyclic_buffer_t* cy_buf);
  * size up to MAX_BUFFER_SIZE.
  * If less than or equal to the 25% of the buffer is full, then the buffer is shrunk in half size. The total size cannot be less
  * than MIN_BUFFER_SIZE.
+ * In all cases min_available_space is always guaranteed for the buffer after the resize operation.
  * @param cy_buf The cyclic buffer to resize. Must not be NULL.
+ * @param min_available_space The available min space that the buffer should have after the resize operation. Must be >= MIN_BUFFER_SIZE
+ * and <=MAX_BUFFER_SIZE
  * @return The buffer's new size in Bytes.
  */
-size_t cyclic_buffer_resize(cyclic_buffer_t* cy_buf);
+size_t cyclic_buffer_resize(cyclic_buffer_t* cy_buf, size_t min_available_space);
 
 /**
  * Checks if the cyclic buffer is empty

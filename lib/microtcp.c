@@ -600,6 +600,7 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
             }
             expected_ack_nums[i] = socket->seq_number;
             tmp_buffer_ptr = ((uint8_t const *)(tmp_buffer_ptr)) + chunk_payload;
+            payload_to_send -= chunk_payload;
         }
 
         /* Congestion avoidance */
@@ -659,7 +660,7 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
             /* No retransmission */
             retransmit_seq_number = socket->seq_number;
         }
-        bytes_sent = retransmit_seq_number-init_seq_number-chunk_count*sizeof(microtcp_header_t); /* TODO: caution */
+        bytes_sent = retransmit_seq_number-init_seq_number-(pos+1)*sizeof(microtcp_header_t); /* TODO: caution */
         payload_left -= bytes_sent;
         total_payload_sent += bytes_sent;
         buffer = ((uint8_t const *)(buffer)) + bytes_sent;
@@ -781,8 +782,8 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
         }
 
         /* Copy received data to recvbuf */
+/*        cyclic_buffer_resize(socket->recvbuf, MICROTCP_MSS); */
         cyclic_buffer_append(socket->recvbuf, data_pointer, (bytes_received-sizeof(microtcp_header_t)));
-        cyclic_buffer_resize(socket->recvbuf);
 
         /* Send ACK */
         bytes_sent = send_header(socket, 1, (socket->ack_number+(uint32_t)bytes_received), 0, 0, 0, 0);

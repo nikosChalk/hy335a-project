@@ -111,27 +111,47 @@ size_t cyclic_buffer_free_size(cyclic_buffer_t* cy_buf) {
     return cy_buf->total_size - cyclic_buffer_cur_size(cy_buf);
 }
 
-size_t cyclic_buffer_resize(cyclic_buffer_t* cy_buf) {
+/**
+ * Resizes this cyclic buffer. If at least 75% of the buffer is full, then the buffer's size is doubled, with total
+ * size up to MAX_BUFFER_SIZE.
+ * If less than or equal to the 25% of the buffer is full, then the buffer is shrunk in half size. The total size cannot be less
+ * than MIN_BUFFER_SIZE.
+ * In all cases min_available_space is always guaranteed for the buffer after the resize operation.
+ * @param cy_buf The cyclic buffer to resize. Must not be NULL.
+ * @param min_available_space The available min space that the buffer should have after the resize operation. Must be >= MIN_BUFFER_SIZE
+ * and <=MAX_BUFFER_SIZE
+ * @return The buffer's new size in Bytes.
+ */
+size_t cyclic_buffer_resize(cyclic_buffer_t* cy_buf, size_t min_available_space) {
     size_t old_size, tmp_size;
+    int expand, shrink, has_realloced;
     void *old_pointer;
-    assert(cy_buf);
+    assert(cy_buf && min_available_space>=MIN_BUFFER_SIZE && min_available_space<=MAX_BUFFER_SIZE);
 
     old_size = cy_buf->total_size;
     old_pointer = cy_buf->data_buffer;
-    if(cyclic_buffer_cur_size(cy_buf) >= (cy_buf->total_size)*0.75) {  /* Expand */
+    expand = cyclic_buffer_cur_size(cy_buf) >= (cy_buf->total_size)*0.75;
+    shrink = cyclic_buffer_cur_size(cy_buf) <= (cy_buf->total_size)*0.25;
+    has_realloced = 0;  /* whether or not a resize operation took place */
+
+    if(expand || (cyclic_buffer_free_size(cy_buf) < min_available_space)) {  /* Expand */
         if(cy_buf->total_size == MAX_BUFFER_SIZE)   /* No expansion available */
             return MAX_BUFFER_SIZE;
 
         /* Expand buffer */
-        cy_buf->total_size = MIN2(MAX_BUFFER_SIZE, (cy_buf->total_size)*2);
+        /* tmp_size == how much space must be at least allocated to satisfy the min_available_space request */
+        tmp_size = (cyclic_buffer_free_size(cy_buf) > min_available_space) ? 0 : (min_available_space - cyclic_buffer_free_size(cy_buf));
+        tmp_size = MAX(((cy_buf->total_size)*2), tmp_size); /* The buffer's new size */
+        cy_buf->total_size = MIN2(MAX_BUFFER_SIZE, tmp_size);
         cy_buf->data_buffer = realloc(cy_buf->data_buffer, cy_buf->total_size);
         if(cy_buf->tail > cy_buf->head) {   /* Tail pointer and data must be moved */
             tmp_size = old_size - cy_buf->tail; /* Data which are right of tail */
             memmove((cy_buf->data_buffer + cy_buf->total_size - tmp_size), (cy_buf->data_buffer + cy_buf->tail), tmp_size);
             cy_buf->tail = cy_buf->total_size - tmp_size;
         }
+        has_realloced = 1;
 
-    } else if (cyclic_buffer_cur_size(cy_buf) <= (cy_buf->total_size)*0.25){    /* Shrink */
+    } else if (shrink && (cyclic_buffer_free_size(cy_buf)/2 >= min_available_space)){    /* Shrink if user's demand will still be satisfied after the shrinking. */
         if(cy_buf->total_size == MIN_BUFFER_SIZE)   /* No shrinking available */
             return MIN_BUFFER_SIZE;
 
@@ -150,9 +170,10 @@ size_t cyclic_buffer_resize(cyclic_buffer_t* cy_buf) {
             }
         }
         cy_buf->data_buffer = realloc(cy_buf->data_buffer, cy_buf->total_size);
+        has_realloced = 1;
     }
 
-    if(cy_buf->data_buffer != old_pointer)  /* re-alloc occured. */
+    if(has_realloced && cy_buf->data_buffer != old_pointer)  /* re-alloc occured. */
         free(old_pointer);  /*the data block was moved. Free the old pointer */
 
     return cy_buf->total_size;
