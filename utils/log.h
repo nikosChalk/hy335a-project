@@ -27,7 +27,7 @@
 #include <sys/syscall.h>
 
 /* Set to 0 to disable debug messages at compile time ;) */
-#define ENABLE_DEBUG_MSG 1
+#define ENABLE_DEBUG_MSG 0
 
 #if ENABLE_DEBUG_MSG
 #define LOG_INFO(M, ...)                                                        \

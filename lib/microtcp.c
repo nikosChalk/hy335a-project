@@ -29,6 +29,13 @@
 static double get_time_diff(struct timespec const *end_time, struct timespec const *start_time);
 
 /**
+ * Returns the current congestion mechanism that the socket should use.
+ * @param socket The socket. Must not be NULL and must have established a connection.
+ * @return The congestion mechanism
+ */
+static microtcp_congestion_mechanism_t current_congestion_mechanism(microtcp_sock_t *socket);
+
+/**
  * Converts the byte order of each field of header, from Network Byte Order
  * to Host Byte Order. We are assuming that the header is in Network Byte Order.
  * @param header The header to convert. Must not be NULL.
@@ -560,7 +567,7 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
     ssize_t total_payload_sent, bytes_received;
     size_t payload_left, payload_to_send, chunk_payload;
     size_t chunk_count, ack_count, bytes_sent;
-    size_t i, j;
+    size_t i, j, some_ack_received;
     uint32_t previous_ack_number, init_seq_number;
     int duplicate_count, pos;
     void const *tmp_buffer_ptr;
@@ -584,6 +591,7 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
 
     payload_left = length;
     total_payload_sent = 0;
+    duplicate_count = 0;
     while(payload_left>0) {
         payload_to_send = MIN3(payload_left, socket->cwnd, socket->peer_win_size);
 
@@ -640,14 +648,17 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
         LOG_INFO("  Chunks sent. Start receiving ACKs...");
         uint8_t received_ack_flags[chunk_count];
         memset(received_ack_flags, 0, chunk_count*sizeof(*received_ack_flags));
-        duplicate_count = 0;
+        some_ack_received = 0;
         for(ack_count=0; ack_count<chunk_count && duplicate_count < DUPS;) {
             bytes_received = threshold_recv(socket, 0);
             if(bytes_received == -1) {  /* Timed out, or something went wrong */
                 if(errno == EAGAIN || errno == EWOULDBLOCK) {   /* Timed out */
                     LOG_INFO("  Timed out while waiting for ACK");
-                    socket->ssthresh = socket->cwnd/2 + 1;
-                    socket->cwnd = MIN2(MICROTCP_MSS, socket->ssthresh);
+                    if(current_congestion_mechanism(socket) == CONGESTION_AVOIDANCE) {
+                        LOG_INFO("  Congestion Avoidance enabled.");
+                        socket->ssthresh = socket->cwnd / 2 + 1;
+                        socket->cwnd = MIN2(MICROTCP_MSS, socket->ssthresh);
+                    }
                     break;
                 }
                 return -1;
@@ -672,6 +683,7 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
                 continue;
             }
             LOG_INFO("  ACK received with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
+            some_ack_received = 1;
             socket->ack_number = header->seq_number + (uint32_t)bytes_received;
             socket->peer_win_size = header->window;
 
@@ -688,6 +700,7 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
                 received_ack_flags[pos] = 1;
                 duplicate_count = 0;
                 ack_count++;
+                socket->cwnd += MICROTCP_MSS;
             } else if (header->ack_number == previous_ack_number ) { /* received duplicate ACK */
                 duplicate_count++;
                 LOG_INFO("  ACK received was duplicate. Current dup_count: %u", duplicate_count);
@@ -702,24 +715,25 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
 
         /* Find the retransmission sequence number and store it in socket->seq_number */
         if(pos == -1) { /* Peer did not receive even the first chunk or we timed out a few times before receiving his ACKS */
-            if(ack_count == 0 || header->ack_number == init_seq_number) { /* Peer did not receive even the first chunk */
+            if(!some_ack_received) { /* Time out happened with no received ACK */
                 bytes_sent = 0;
                 socket->seq_number = init_seq_number;
             } else {
-                /* We timed out a few times. Hence our congestion window has dropped significantly and the received ack number */
+                /* Peer did not receive even the first chunk or */
+                /* we timed out a few times. Hence our congestion window has dropped significantly and the received ack number */
                 /* cannot exist within expected_ack_nums[] array since it is an ack_number greater than the values within the array */
                 /* No retansmission should occur */
 
                 /* Search the packet to which this ack_number belongs and calculate the payload which was not acknowledged */
                 bytes_sent = 0;
-                for(j=0; log_sent_seq_nums[j] != header->ack_number; j++)
+                for (j = 0; log_sent_seq_nums[j] != header->ack_number; j++)
                     bytes_sent += log_data_len_sent[j];
-                assert(j<=valid_log_elements);
+                assert(j <= valid_log_elements);
                 socket->seq_number = header->ack_number;
 
                 /* Since such an ACK was received, we can safely delete elements with index < j */
                 valid_log_elements = valid_log_elements - j;
-                total_log_elements = valid_log_elements*2;
+                total_log_elements = valid_log_elements * 2;
                 memmove(log_sent_seq_nums, (log_sent_seq_nums + j), (sizeof(*log_sent_seq_nums) * valid_log_elements));
                 memmove(log_data_len_sent, (log_data_len_sent + j), (sizeof(*log_data_len_sent) * valid_log_elements));
                 log_sent_seq_nums = realloc(log_sent_seq_nums, sizeof(*log_sent_seq_nums) * total_log_elements);
@@ -737,9 +751,14 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
         total_payload_sent += bytes_sent;
         buffer = ((uint8_t const *)(buffer)) + bytes_sent;
 
-        if(duplicate_count == 3){
-            socket->ssthresh = socket->cwnd/2 + 1;
-            socket->cwnd = socket->cwnd/2 + 1;
+        if(duplicate_count == 3) {
+            LOG_INFO("  Received 3 duplicate continious ACKs");
+            duplicate_count = 0;
+            if(current_congestion_mechanism(socket) == CONGESTION_AVOIDANCE) {
+                LOG_INFO("  Congestion avoidance enabled");
+                socket->ssthresh = socket->cwnd / 2 + 1;
+                socket->cwnd = socket->cwnd / 2 + 1;
+            }
         }
 
         /* Restore socket to non-time out mode */
@@ -833,11 +852,12 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
             if (is_ack_header && !is_fin_header) {
                 LOG_INFO("    Packet received was a dangling ACK or sender failed the CRC checksum when receiving 3 DUPs. Packet ignored.");
             } else if (!is_ack_header && is_out_of_order) {    /* Check if received packet is out of order. */
-                LOG_WARN("    Packet dropped. Received packet with seq_number %u, while expecting %u. Sending %u DUPs...", header->seq_number, socket->ack_number, DUPS);
-                if (send_dups(socket, DUPS) == -1)
+                LOG_WARN("    Packet dropped. Received packet with seq_number %u, while expecting %u. Sending DUP...", header->seq_number, socket->ack_number);
+                if (send_dups(socket, 1) == -1) {
                     LOG_WARN("    Could not send DUPs.");
-                else
-                    LOG_INFO("    All DUPs successfully sent with ack_number %u. Current seq_number %u", socket->ack_number, socket->seq_number);
+                } else {
+                    LOG_INFO("    DUP successfully sent with ack_number %u. Current seq_number %u", socket->ack_number, socket->seq_number);
+                }
             }
         } while (is_out_of_order || (is_ack_header && !is_fin_header));
 
@@ -1022,11 +1042,12 @@ static ssize_t threshold_recv(microtcp_sock_t *socket, int flags) {
         header->checksum = crc32(socket->packet_buffer, (sizeof(microtcp_header_t) + header->data_len));
         is_checksum_ok = (received_checksum == header->checksum);
         if(!is_checksum_ok) {
-            LOG_WARN("    Received packet with wrong checksum. Sending %u DUPs...", DUPS);
-            if(send_dups(socket, DUPS) == -1)
+            LOG_WARN("    Received packet with wrong checksum. Sending DUP...");
+            if(send_dups(socket, 1) == -1) {
                 LOG_WARN("    Could not send DUPs.");
-            else
-                LOG_INFO("    All DUPs successfully sent with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
+            } else {
+                LOG_INFO("    DUP successfully sent with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
+            }
         }
     } while(!is_checksum_ok);
 
@@ -1036,7 +1057,6 @@ static ssize_t threshold_recv(microtcp_sock_t *socket, int flags) {
 }
 
 static ssize_t recv_header(microtcp_sock_t *socket, uint8_t ack, uint8_t rst, uint8_t syn, uint8_t fin, int flags) {
-    /* TODO: statistics */
     microtcp_header_t *received_header;
     microtcp_header_t dummy_header = microtcp_header();
     ssize_t bytes_received;
@@ -1251,6 +1271,14 @@ static ssize_t send_dups(microtcp_sock_t *socket, size_t dups) {
     }
 
     return total_bytes_sent;
+}
+
+static microtcp_congestion_mechanism_t current_congestion_mechanism(microtcp_sock_t *socket) {
+    assert(socket);
+    if(socket->cwnd <= socket->ssthresh)
+        return SLOW_START;
+    else
+        return CONGESTION_AVOIDANCE;
 }
 
 static void ntoh_header(microtcp_header_t *header) {

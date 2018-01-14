@@ -53,6 +53,11 @@ typedef enum {
     UNKNOWN     /* Set by microtcp_socket */
 } mircotcp_state_t;
 
+typedef enum {
+    SLOW_START,
+    CONGESTION_AVOIDANCE,
+} microtcp_congestion_mechanism_t;
+
 /**
  * microTCP header structure
  * NOTE: DO NOT CHANGE!
