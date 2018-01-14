@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
         clock_gettime(CLOCK_MONOTONIC_RAW, &end_time);
         double elapsed = end_time.tv_sec - start_time.tv_sec + (end_time.tv_nsec - start_time.tv_nsec) * 1e-9;
         printf("%lf\n", elapsed);
-        if(ret_recv == 0){
+        if(ret_recv == -1){
             break;
         }
     }

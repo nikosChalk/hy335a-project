@@ -619,9 +619,8 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
             bytes_received = recv_header(socket, 1, 0, 0, 0, 0);
             if(bytes_received == -1) {  /* Timed out, or something went wrong */
                 if(errno == EAGAIN || errno == EWOULDBLOCK) {   /* Timed out */
-                    socket->ssthresh = socket->cwnd/2;
+                    socket->ssthresh = socket->cwnd/2 + 1;
                     socket->cwnd = MIN2(MICROTCP_MSS, socket->ssthresh);
-/*                    socket->cwnd += MICROTCP_MSS; */
                     break;
                 }
                 return -1;  /* TODO: is this okay? */
@@ -782,7 +781,7 @@ ssize_t microtcp_recv (microtcp_sock_t *socket, void *buffer, size_t length, int
         }
 
         /* Copy received data to recvbuf */
-/*        cyclic_buffer_resize(socket->recvbuf, MICROTCP_MSS); */
+        cyclic_buffer_resize(socket->recvbuf, MICROTCP_MSS);
         cyclic_buffer_append(socket->recvbuf, data_pointer, (bytes_received-sizeof(microtcp_header_t)));
 
         /* Send ACK */

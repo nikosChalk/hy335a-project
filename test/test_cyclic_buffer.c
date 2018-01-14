@@ -1,21 +1,22 @@
 
 
 #include <string.h>
+#include <stdint.h>
 #include "../lib/cyclic_buffer.h"
 
-void foo(int x) {
-    x++;
-    memcpy(NULL, &x, x-6);
-    return;
-}
-
 int main() {
-    int *p = NULL;
-    int x = 5;
-    int z = x*13*0;
-    int y = 32*x*z;
+    cyclic_buffer_t *cy_buf;
+    uint8_t data_buf[12000];
+    int i=0;
 
-    foo(5);
+    cy_buf = cyclic_buffer_make(8192);
+
+    for(i=0; i<10; i++) {
+
+        cyclic_buffer_resize(cy_buf, 1400);
+        cyclic_buffer_append(cy_buf, data_buf, 1400);
+    }
+
     return 0;
 }
 
