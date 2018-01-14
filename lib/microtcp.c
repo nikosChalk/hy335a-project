@@ -497,7 +497,7 @@ int microtcp_accept (microtcp_sock_t *socket, struct sockaddr *address, socklen_
 int microtcp_shutdown (microtcp_sock_t *socket, int how) {
     microtcp_header_t *header = (microtcp_header_t *)socket->packet_buffer;
 
-    if(socket->state == ESTABLISHED || socket->state == CLOSING_BY_PEER) {    /* User explicitly requests connection termination */
+    if(socket->state == ESTABLISHED || socket->state == CLOSING_BY_PEER) {    /* User explicitly requests connection termination or FIN received */
         LOG_INFO("Connection termination requested...");
 
         /* Send FIN, ACK */
@@ -518,7 +518,7 @@ int microtcp_shutdown (microtcp_sock_t *socket, int how) {
         }
         LOG_INFO("ACK packet received with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
 
-        if(socket->state == ESTABLISHED) {
+        if(socket->state == ESTABLISHED) { /* User explicitly requests connection termination */
             socket->state = CLOSING_BY_HOST;
 
             /* Waiting for FIN ACK */
@@ -557,16 +557,25 @@ int microtcp_shutdown (microtcp_sock_t *socket, int how) {
 
 ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length, int flags) {
     microtcp_header_t *const header = (microtcp_header_t *)socket->packet_buffer;
-    ssize_t total_payload_sent;
+    ssize_t total_payload_sent, bytes_received;
     size_t payload_left, payload_to_send, chunk_payload;
-    size_t chunk_count, ack_count, i, bytes_sent;
-    ssize_t bytes_received;
-    uint32_t previous_ack_number, init_seq_number, retransmit_seq_number;
+    size_t chunk_count, ack_count, bytes_sent;
+    size_t i, j;
+    uint32_t previous_ack_number, init_seq_number;
     int duplicate_count, pos;
     void const *tmp_buffer_ptr;
 
+    /* Used to determine how many DATA Bytes were sent when we receive an ACK that is not within expected_ack_nums */
+    size_t total_log_elements = MAX(1, (length/MICROTCP_MSS));
+    size_t valid_log_elements = 0;
+    uint32_t *log_sent_seq_nums = malloc(sizeof(uint32_t)*total_log_elements);
+    size_t *log_data_len_sent = malloc(sizeof(uint32_t)*total_log_elements);
+
     if(!socket) {
         LOG_ERROR("NULL socket passed");
+        return -1;
+    } else if(socket->state == CLOSING_BY_PEER) {
+        LOG_WARN("Called microtcp_send() while socket's state is CLOSING_BY_PEER. Returning -1");
         return -1;
     } else if(socket->state != ESTABLISHED) {
         LOG_ERROR("Socket has invalid state");
@@ -601,6 +610,22 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
             expected_ack_nums[i] = socket->seq_number;
             tmp_buffer_ptr = ((uint8_t const *)(tmp_buffer_ptr)) + chunk_payload;
             payload_to_send -= chunk_payload;
+
+            /* Log the sending of packet with sequence number: sent_seq_nums[i] */
+            /* Search if a packet with that sequence number was previously sent */
+            j=0;
+            while(j<valid_log_elements && log_sent_seq_nums[j] != sent_seq_nums[i]) /* Use linear search because overflow might occur */
+                j++;
+            if(j == valid_log_elements) { /* No packet with sent_seq_nums[i] was found.  */
+                if(valid_log_elements == total_log_elements) { /* array is full. Double the size before insertion */
+                    total_log_elements *= 2;
+                    log_sent_seq_nums = realloc(log_sent_seq_nums, sizeof(*log_sent_seq_nums) * total_log_elements);
+                    log_data_len_sent = realloc(log_data_len_sent, sizeof(*log_data_len_sent) * total_log_elements);
+                }
+                valid_log_elements++;
+            }
+            log_sent_seq_nums[j] = sent_seq_nums[i];
+            log_data_len_sent[j] = chunk_payload;
         }
 
         /* Congestion avoidance */
@@ -612,19 +637,43 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
 
 
         /* Start receiving ACKs */
+        LOG_INFO("  Chunks sent. Start receiving ACKs...");
         uint8_t received_ack_flags[chunk_count];
         memset(received_ack_flags, 0, chunk_count*sizeof(*received_ack_flags));
         duplicate_count = 0;
-        for(ack_count=0; ack_count<chunk_count && duplicate_count < DUPS; ack_count++) {
-            bytes_received = recv_header(socket, 1, 0, 0, 0, 0);
+        for(ack_count=0; ack_count<chunk_count && duplicate_count < DUPS;) {
+            bytes_received = threshold_recv(socket, 0);
             if(bytes_received == -1) {  /* Timed out, or something went wrong */
                 if(errno == EAGAIN || errno == EWOULDBLOCK) {   /* Timed out */
+                    LOG_INFO("  Timed out while waiting for ACK");
                     socket->ssthresh = socket->cwnd/2 + 1;
                     socket->cwnd = MIN2(MICROTCP_MSS, socket->ssthresh);
                     break;
                 }
-                return -1;  /* TODO: is this okay? */
+                return -1;
             }
+
+            if(is_fin(header)) {
+                LOG_INFO("  FIN received while waiting for ACK reply to sent packet.");
+                LOG_INFO("  Setting state to CLOSING_BY_PEER");
+                socket->state = CLOSING_BY_PEER;
+
+                if(set_recv_timeout(socket, 0) < 0) {    /* Disable timeout */
+                    LOG_ERROR("  Call to setsockopt() failed while disabling timeout.");
+                    perror(NULL);
+                }
+                if(send_header(socket, 1, (socket->ack_number+(uint32_t)bytes_received), 0, 0, 0, 0) == -1) {   /* Reply to FIN with ACK */
+                    LOG_ERROR("Failed to send ACK header in response to FIN.");
+                    perror(NULL);
+                }
+                return (total_payload_sent>0) ? total_payload_sent : -1;
+            } else if(!is_ack(header)) {
+                LOG_WARN("  Received packet was not ACK while expecting ACK packet. Packet dropped.");
+                continue;
+            }
+            LOG_INFO("  ACK received with seq_number %u and ack_number %u", header->seq_number, header->ack_number);
+            socket->ack_number = header->seq_number + (uint32_t)bytes_received;
+            socket->peer_win_size = header->window;
 
             pos=0;
             while(pos<chunk_count && header->ack_number != expected_ack_nums[pos])
@@ -632,38 +681,61 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
             if(pos == chunk_count) {    /* Received ACK was duplicate and peer did not receive even the first packet */
                 previous_ack_number = init_seq_number;
                 duplicate_count++;
-            } else if(ack_count ==0) {  /* first received ack. Cannot be duplicate */
+                LOG_INFO("  ACK received was duplicate indicating peer did not receive the first packet. Current dup_count: %u", duplicate_count);
+            } else if(ack_count == 0 || header->ack_number != previous_ack_number) {  /* first received ack. Cannot be duplicate. OR. non-duplicate, normal ACK received */
+                LOG_INFO("  ACK received was normal one and not duplicate.");
                 previous_ack_number = header->ack_number;
                 received_ack_flags[pos] = 1;
-            } else if(header->ack_number != previous_ack_number) {  /* non-duplicate, normal ACK */
-                received_ack_flags[pos] = 1;
                 duplicate_count = 0;
-                socket->cwnd += MICROTCP_MSS;
+                ack_count++;
             } else if (header->ack_number == previous_ack_number ) { /* received duplicate ACK */
                 duplicate_count++;
+                LOG_INFO("  ACK received was duplicate. Current dup_count: %u", duplicate_count);
             }
         }
 
         /* Find the last ack_number that we received */
-        for(i=0, pos=-1; i<chunk_count; i++)
+        pos = -1;
+        for(i=0; i<chunk_count; i++)
             if(received_ack_flags[i] == 1)
                 pos = (int)i;
 
-        /* Find the retransmission sequence number */
-        if(pos == -1) { /* Peer did not receive even the first chunk */
-            retransmit_seq_number = init_seq_number;
+        /* Find the retransmission sequence number and store it in socket->seq_number */
+        if(pos == -1) { /* Peer did not receive even the first chunk or we timed out a few times before receiving his ACKS */
+            if(ack_count == 0 || header->ack_number == init_seq_number) { /* Peer did not receive even the first chunk */
+                bytes_sent = 0;
+                socket->seq_number = init_seq_number;
+            } else {
+                /* We timed out a few times. Hence our congestion window has dropped significantly and the received ack number */
+                /* cannot exist within expected_ack_nums[] array since it is an ack_number greater than the values within the array */
+                /* No retansmission should occur */
+
+                /* Search the packet to which this ack_number belongs and calculate the payload which was not acknowledged */
+                bytes_sent = 0;
+                for(j=0; log_sent_seq_nums[j] != header->ack_number; j++)
+                    bytes_sent += log_data_len_sent[j];
+                assert(j<=valid_log_elements);
+                socket->seq_number = header->ack_number;
+
+                /* Since such an ACK was received, we can safely delete elements with index < j */
+                valid_log_elements = valid_log_elements - j;
+                total_log_elements = valid_log_elements*2;
+                memmove(log_sent_seq_nums, (log_sent_seq_nums + j), (sizeof(*log_sent_seq_nums) * valid_log_elements));
+                memmove(log_data_len_sent, (log_data_len_sent + j), (sizeof(*log_data_len_sent) * valid_log_elements));
+                log_sent_seq_nums = realloc(log_sent_seq_nums, sizeof(*log_sent_seq_nums) * total_log_elements);
+                log_data_len_sent = realloc(log_data_len_sent, sizeof(*log_data_len_sent) * total_log_elements);
+            }
         } else if (expected_ack_nums[pos] != socket->seq_number) {  /* peer received some chunks */
             assert(pos < chunk_count);
-            retransmit_seq_number = sent_seq_nums[pos+1];
+            bytes_sent = sent_seq_nums[pos+1]-init_seq_number-(pos+1)*sizeof(microtcp_header_t);
+            socket->seq_number = sent_seq_nums[pos+1];
         } else {    /* Peer received all chunks */
             /* No retransmission */
-            retransmit_seq_number = socket->seq_number;
+            bytes_sent = socket->seq_number-init_seq_number-chunk_count*sizeof(microtcp_header_t);
         }
-        bytes_sent = retransmit_seq_number-init_seq_number-(pos+1)*sizeof(microtcp_header_t); /* TODO: caution */
         payload_left -= bytes_sent;
         total_payload_sent += bytes_sent;
         buffer = ((uint8_t const *)(buffer)) + bytes_sent;
-        socket->seq_number = retransmit_seq_number;
 
         if(duplicate_count == 3){
             socket->ssthresh = socket->cwnd/2 + 1;
@@ -675,11 +747,6 @@ ssize_t microtcp_send(microtcp_sock_t *socket, const void *buffer, size_t length
             LOG_ERROR("  Call to setsockopt() failed while disabling timeout.");
             perror(NULL);
             return (total_payload_sent>0) ? total_payload_sent : -1;
-        }
-
-        /* Peer did not receive all chunks and has not been filled. Do not probe him */
-        if(retransmit_seq_number != socket->seq_number){
-            continue;
         }
 
         /* Peer's buffer might be filled up. Probe him until we get a positive window. */
